@@ -206,6 +206,7 @@ final class AppSettings {
     var hotKeyCode: UInt32 { didSet { defaults.set(Int(hotKeyCode), forKey: "hotKeyCode") } }
     var hotKeyModifiers: UInt32 { didSet { defaults.set(Int(hotKeyModifiers), forKey: "hotKeyModifiers") } }
     var hotKeyLabel: String { didSet { defaults.set(hotKeyLabel, forKey: "hotKeyLabel") } }
+    var quickPanelTransparency: Double { didSet { defaults.set(quickPanelTransparency, forKey: "quickPanelTransparency") } }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -215,6 +216,8 @@ final class AppSettings {
         hotKeyCode = UInt32(clamping: defaults.object(forKey: "hotKeyCode") == nil ? 49 : defaults.integer(forKey: "hotKeyCode"))
         hotKeyModifiers = UInt32(clamping: defaults.object(forKey: "hotKeyModifiers") == nil ? 6144 : defaults.integer(forKey: "hotKeyModifiers"))
         hotKeyLabel = defaults.string(forKey: "hotKeyLabel") ?? "⌃⌥Space"
+        let transparency = defaults.object(forKey: "quickPanelTransparency") as? Double ?? 0.65
+        quickPanelTransparency = transparency.isFinite ? min(1, max(0, transparency)) : 0.65
     }
     var limits: HistoryLimits { HistoryLimits(days: historyDays, count: historyCount, bytes: historyMegabytes * 1_000_000) }
 }

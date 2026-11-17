@@ -11,7 +11,7 @@
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
-    <key>LSMinimumSystemVersion</key><string>15.4</string>
+    <key>LSMinimumSystemVersion</key><string>26.0</string>
     <key>LSUIElement</key><true/>
     <key>LSMultipleInstancesProhibited</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>

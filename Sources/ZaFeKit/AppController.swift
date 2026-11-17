@@ -18,6 +18,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     var quickSelection: UUID?
     var quickNoteID: UUID?
     var isPinned = false
+    var isAdjustingPanelAppearance = false
     @ObservationIgnored private var panel: QuickPanel?
     @ObservationIgnored private var mainWindow: NSWindow?
     @ObservationIgnored private var settingsWindow: NSWindow?
@@ -77,6 +78,10 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     func handleKey(_ event: NSEvent) -> NSEvent? {
         if NSApp.keyWindow === panel {
             guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return event }
+            if isAdjustingPanelAppearance {
+                if event.keyCode == 53 { isAdjustingPanelAppearance = false; return nil }
+                return event
+            }
             if quickNote != nil {
                 if event.keyCode == 53 { closeQuickNote(); return nil }
                 return event
@@ -124,6 +129,8 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
             window.title = "ZaFe"
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
+            window.isOpaque = false
+            window.backgroundColor = .clear
             window.isFloatingPanel = true
             window.level = .floating
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -134,7 +141,16 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
             window.delegate = self
             window.nextResponder = self
             for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { window.standardWindowButton(button)?.isHidden = true }
-            window.contentView = NSHostingView(rootView: QuickPanelView(controller: self))
+            let glass = NSGlassEffectView(frame: window.contentView?.bounds ?? .zero)
+            glass.style = .clear
+            glass.cornerRadius = QuickPanel.cornerRadius
+            let content = NSHostingView(rootView: QuickPanelView(controller: self))
+            // The panel draws its own header across the full glass surface.
+            content.safeAreaRegions = []
+            content.frame = glass.bounds
+            content.autoresizingMask = [.width, .height]
+            glass.contentView = content
+            window.contentView = glass
             panel = window
             if savedFrame == nil { positionPanel() }
         }
@@ -165,6 +181,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
         panel?.makeFirstResponder(nil)
         guard store.flush() else { return }
         savePanelFrame()
+        isAdjustingPanelAppearance = false
         panel?.orderOut(nil)
         if returnFocus, let previousApplication, previousApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             previousApplication.activate()
@@ -179,7 +196,11 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     func windowDidResignKey(_ notification: Notification) {
         if let window = notification.object as? NSWindow, window === panel {
             window.makeFirstResponder(nil)
-            if !isPinned, store.flush() { savePanelFrame(); window.orderOut(nil) }
+            if !isPinned, store.flush() {
+                savePanelFrame()
+                isAdjustingPanelAppearance = false
+                window.orderOut(nil)
+            }
         }
     }
 
@@ -365,6 +386,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
 
 final class QuickPanel: NSPanel {
     static let minimumSize = NSSize(width: 380, height: 400)
+    static let cornerRadius: CGFloat = 12
     static let frameKey = "quickPanelFrame"
 
     static func savedFrame(in defaults: UserDefaults) -> NSRect? {

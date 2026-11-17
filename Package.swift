@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "ZaFe",
-    platforms: [.macOS("15.4")],
+    platforms: [.macOS("26.0")],
     products: [.executable(name: "ZaFe", targets: ["ZaFe"])],
     targets: [
         .target(name: "ZaFeKit"),

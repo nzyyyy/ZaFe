@@ -154,7 +154,9 @@ struct AddFilesMenu: View {
 
 struct QuickPanelView: View {
     @Bindable var controller: AppController
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @FocusState private var searchFocused: Bool
+    @FocusState private var appearanceFocused: Bool
     @State private var dropTargeted = false
     @State private var hoveredRecordID: UUID?
     @State private var hoveredFilter: LibraryFilter?
@@ -168,13 +170,15 @@ struct QuickPanelView: View {
                             .help("返回列表 Esc")
                             .modifier(PanelHover())
                         Spacer()
+                        appearanceButton
                         Button { controller.newNote() } label: { Image(systemName: "square.and.pencil") }
                             .help("新建便签 ⌘N").accessibilityLabel("新建便签")
                             .modifier(PanelHover())
                     }
                     .buttonStyle(.borderless).padding(.horizontal, 18).padding(.vertical, 14)
+                    appearanceControls
                     Divider()
-                    RecordDetailView(record: note, controller: controller).id(note.id)
+                    RecordDetailView(record: note, controller: controller, showsBackground: false).id(note.id)
                     StatusArea(controller: controller)
                 }
             } else {
@@ -183,9 +187,8 @@ struct QuickPanelView: View {
         }
         .frame(minWidth: QuickPanel.minimumSize.width, maxWidth: .infinity,
                minHeight: QuickPanel.minimumSize.height, maxHeight: .infinity)
-        .ignoresSafeArea(.container, edges: .top)
         .environment(\.quickPanelHover, true)
-        .background(.regularMaterial)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(reduceTransparency ? 1 : 1 - controller.settings.quickPanelTransparency))
         .overlay { if dropTargeted { RoundedRectangle(cornerRadius: 10).stroke(.tint, lineWidth: 2).padding(4).allowsHitTesting(false) } }
         .dropDestination(for: URL.self) { urls, _ in
             let files = urls.filter(\.isFileURL)
@@ -196,6 +199,42 @@ struct QuickPanelView: View {
         .onReceive(NotificationCenter.default.publisher(for: .focusQuickSearch)) { _ in searchFocused = controller.quickNote == nil }
         .onChange(of: controller.quickQuery) { _, _ in controller.quickSelection = nil }
         .onChange(of: controller.quickFilter) { _, _ in controller.quickSelection = nil }
+        .onChange(of: controller.isAdjustingPanelAppearance) { _, expanded in
+            searchFocused = !expanded && controller.quickNote == nil
+            appearanceFocused = expanded && !reduceTransparency
+        }
+    }
+
+    private var appearanceButton: some View {
+        Button { controller.isAdjustingPanelAppearance.toggle() } label: {
+            Image(systemName: "circle.lefthalf.filled")
+                .foregroundStyle(controller.isAdjustingPanelAppearance ? .primary : .secondary)
+        }
+        .help("外观").accessibilityLabel("外观")
+        .accessibilityValue(controller.isAdjustingPanelAppearance ? "已展开" : "已收起")
+        .modifier(PanelHover())
+    }
+
+    @ViewBuilder private var appearanceControls: some View {
+        @Bindable var settings = controller.settings
+        if controller.isAdjustingPanelAppearance {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Text("通透度").font(.system(size: 11))
+                    Slider(value: $settings.quickPanelTransparency, in: 0...1)
+                        .focused($appearanceFocused).disabled(reduceTransparency)
+                        .accessibilityLabel("通透度")
+                        .accessibilityValue(controller.settings.quickPanelTransparency.formatted(.percent.precision(.fractionLength(0))))
+                    Text(controller.settings.quickPanelTransparency, format: .percent.precision(.fractionLength(0)))
+                        .font(.system(size: 11)).monospacedDigit().frame(width: 38, alignment: .trailing)
+                }
+                if reduceTransparency {
+                    Text("系统已开启“减少透明度”，暂时使用实色背景。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 18).padding(.bottom, 12)
+        }
     }
 
     private var recordList: some View {
@@ -204,6 +243,7 @@ struct QuickPanelView: View {
                 Image(systemName: "square.stack.3d.up").font(.system(size: 17, weight: .medium))
                 Text("ZaFe").font(.system(size: 15, weight: .semibold))
                 Spacer()
+                appearanceButton
                 Button { controller.isPinned.toggle() } label: {
                     Image(systemName: controller.isPinned ? "pin.fill" : "pin")
                         .foregroundStyle(controller.isPinned ? .primary : .secondary)
@@ -215,6 +255,7 @@ struct QuickPanelView: View {
                     .modifier(PanelHover())
             }
             .buttonStyle(.borderless).padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 13)
+            appearanceControls
 
             HStack(spacing: 9) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -411,6 +452,7 @@ struct ManagerView: View {
 struct RecordDetailView: View {
     @Bindable var record: LibraryRecord
     let controller: AppController
+    var showsBackground = true
     @State private var confirmPermanentDelete = false
 
     var body: some View {
@@ -455,7 +497,7 @@ struct RecordDetailView: View {
                 if record.kind == .note || record.kind == .text { Text("\(record.body.count) 字") }
             }.font(.system(size: 10)).foregroundStyle(.tertiary).padding(.horizontal, 24).padding(.vertical, 12)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(showsBackground ? Color(nsColor: .textBackgroundColor) : .clear)
         .confirmationDialog("彻底删除？此操作无法恢复。", isPresented: $confirmPermanentDelete, titleVisibility: .visible) {
             Button("彻底删除", role: .destructive) { controller.store.permanentlyDelete([record]) }
         }

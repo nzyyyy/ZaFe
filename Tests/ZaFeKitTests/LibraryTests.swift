@@ -34,6 +34,22 @@ private struct TestLibrary {
 struct LibraryTests {
     let now = Date(timeIntervalSince1970: 2_000_000_000)
 
+    @Test func quickPanelTransparencyDefaultsPersistsAndValidatesStoredValues() {
+        let defaults = MemoryDefaults()
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.quickPanelTransparency == 0.65)
+        for value in [0.0, 0.42, 1.0] {
+            settings.quickPanelTransparency = value
+            #expect(AppSettings(defaults: defaults).quickPanelTransparency == value)
+        }
+        for (stored, expected) in [(-0.5, 0.0), (1.5, 1.0), (.nan, 0.65), (.infinity, 0.65), (-.infinity, 0.65)] {
+            defaults.set(stored, forKey: "quickPanelTransparency")
+            #expect(AppSettings(defaults: defaults).quickPanelTransparency == expected)
+        }
+        defaults.set("invalid", forKey: "quickPanelTransparency")
+        #expect(AppSettings(defaults: defaults).quickPanelTransparency == 0.65)
+    }
+
     @Test func duplicateClipboardUpdatesExistingButNeverMergesNotes() throws {
         let library = try TestLibrary(); defer { library.clean() }
         let store = try library.store()
@@ -300,12 +316,20 @@ struct LibraryTests {
         #expect(panel.isVisible)
         try #require(application.keyWindow === panel)
         #expect(controller.quickSelection == note.id)
-        for code: UInt16 in [36, 76, 125, 126] {
-            let event = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
-                                                    windowNumber: panel.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: code))
-            #expect(controller.handleKey(event) === event)
-            #expect(controller.quickNote?.id == note.id)
+        for adjusting in [false, true] {
+            controller.isAdjustingPanelAppearance = adjusting
+            for code: UInt16 in [36, 76, 125, 126] {
+                let event = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                        windowNumber: panel.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: code))
+                #expect(controller.handleKey(event) === event)
+                #expect(controller.quickNote?.id == note.id)
+            }
         }
+        let appearanceEscape = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                           windowNumber: panel.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        #expect(controller.handleKey(appearanceEscape) == nil)
+        #expect(!controller.isAdjustingPanelAppearance)
+        #expect(controller.quickNote?.id == note.id)
         store.updateNote(note, title: "标题", body: "正文\n第二行")
         controller.closeQuickNote()
         #expect(controller.quickNote == nil)
@@ -378,20 +402,55 @@ struct LibraryTests {
             #expect(controller.quickSelection == controller.quickRecords.first?.id)
             let panel = try #require(application.windows.first { $0 is QuickPanel && $0.delegate === controller })
             #expect(panel.styleMask.contains(.resizable))
+            #expect(!panel.isOpaque)
+            #expect(panel.backgroundColor == .clear)
+            #expect(panel.alphaValue == 1)
+            let glass = try #require(panel.contentView as? NSGlassEffectView)
+            #expect(glass.style == .clear)
+            #expect(glass.cornerRadius == QuickPanel.cornerRadius)
+            let content = try #require(glass.contentView)
+            #expect(!content.isOpaque)
+            #expect(content.alphaValue == 1)
             panel.setFrame(target, display: false)
+            panel.contentView?.layoutSubtreeIfNeeded()
+            #expect(content.frame == glass.bounds)
             controller.windowDidEndLiveResize(Notification(name: NSWindow.didEndLiveResizeNotification, object: panel))
             #expect(QuickPanel.savedFrame(in: library.settings.defaults) == target)
             controller.newNote()
             #expect(panel.frame == target)
             controller.closeQuickNote()
             #expect(panel.frame == target)
+            controller.isAdjustingPanelAppearance = true
+            library.settings.quickPanelTransparency = 0.42
+            let selection = controller.quickSelection
+            for code: UInt16 in [36, 76, 123, 124, 125, 126] {
+                let event = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                        windowNumber: panel.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: code))
+                #expect(controller.handleKey(event) === event)
+                #expect(controller.quickSelection == selection)
+                #expect(panel.isVisible)
+                #expect(pasteboard.types?.isEmpty != false)
+            }
+            let escape = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                     windowNumber: panel.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+            #expect(controller.handleKey(escape) == nil)
+            #expect(!controller.isAdjustingPanelAppearance)
+            #expect(panel.isVisible)
+            let down = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                   windowNumber: panel.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 125))
+            #expect(controller.handleKey(down) == nil)
+            #expect(controller.quickSelection == controller.quickRecords.first?.id)
+            controller.isAdjustingPanelAppearance = true
             controller.closeQuickPanel(returnFocus: false)
+            #expect(!controller.isAdjustingPanelAppearance)
             controller.toggleQuickPanel()
+            #expect(!controller.isAdjustingPanelAppearance)
             #expect(panel.frame == target)
             #expect(controller.quickSelection == nil)
             controller.closeQuickPanel(returnFocus: false)
         }
         let settings = AppSettings(defaults: library.settings.defaults)
+        #expect(settings.quickPanelTransparency == 0.42)
         let controller = AppController(store: store, settings: settings, pasteboard: pasteboard)
         controller.clipboard.stop()
         defer { controller.stop() }
