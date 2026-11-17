@@ -66,6 +66,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     required init?(coder: NSCoder) { return nil }
 
     func stop() {
+        savePanelFrame()
         hotKey.stop()
         clipboard.stop()
         cleanupTimer?.invalidate()
@@ -113,12 +114,13 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
 
     private func showQuickPanel() {
         if panel?.isVisible == true { panel?.makeKeyAndOrderFront(nil); return }
+        let savedFrame = QuickPanel.savedFrame(in: settings.defaults)
         if let application = NSWorkspace.shared.frontmostApplication, application.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             previousApplication = application
         }
         if panel == nil {
             let window = QuickPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 600),
-                                    styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel], backing: .buffered, defer: false)
+                                    styleMask: [.titled, .resizable, .fullSizeContentView, .nonactivatingPanel], backing: .buffered, defer: false)
             window.title = "ZaFe"
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
@@ -128,16 +130,23 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
             window.isMovableByWindowBackground = true
             window.hidesOnDeactivate = false
             window.isReleasedWhenClosed = false
+            window.minSize = QuickPanel.minimumSize
             window.delegate = self
             window.nextResponder = self
             for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { window.standardWindowButton(button)?.isHidden = true }
             window.contentView = NSHostingView(rootView: QuickPanelView(controller: self))
             panel = window
+            if savedFrame == nil { positionPanel() }
         }
         quickQuery = ""
-        quickSelection = quickNote?.id ?? quickRecords.first?.id
-        positionPanel()
+        quickSelection = quickNote?.id
+        if let panel {
+            let fallback = statusItem?.button?.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
+                ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+            panel.setFrame(QuickPanel.constrainedFrame(savedFrame ?? panel.frame, visibleFrames: NSScreen.screens.map(\.visibleFrame), fallback: fallback), display: false)
+        }
         panel?.makeKeyAndOrderFront(nil)
+        savePanelFrame()
         NotificationCenter.default.post(name: .focusQuickSearch, object: nil)
     }
 
@@ -155,6 +164,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     func closeQuickPanel(returnFocus: Bool = true) {
         panel?.makeFirstResponder(nil)
         guard store.flush() else { return }
+        savePanelFrame()
         panel?.orderOut(nil)
         if returnFocus, let previousApplication, previousApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             previousApplication.activate()
@@ -169,8 +179,28 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     func windowDidResignKey(_ notification: Notification) {
         if let window = notification.object as? NSWindow, window === panel {
             window.makeFirstResponder(nil)
-            if !isPinned, store.flush() { window.orderOut(nil) }
+            if !isPinned, store.flush() { savePanelFrame(); window.orderOut(nil) }
         }
+    }
+
+    private func savePanelFrame() {
+        guard let panel else { return }
+        settings.defaults.set(NSStringFromRect(panel.frame), forKey: QuickPanel.frameKey)
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === panel, window.isVisible else { return }
+        savePanelFrame()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === panel, window.isVisible, !window.inLiveResize else { return }
+        savePanelFrame()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === panel else { return }
+        savePanelFrame()
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -334,6 +364,30 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
 }
 
 final class QuickPanel: NSPanel {
+    static let minimumSize = NSSize(width: 380, height: 400)
+    static let frameKey = "quickPanelFrame"
+
+    static func savedFrame(in defaults: UserDefaults) -> NSRect? {
+        guard let value = defaults.string(forKey: frameKey) else { return nil }
+        let frame = NSRectFromString(value)
+        guard [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height].allSatisfy(\.isFinite),
+              frame.size.width > 0, frame.size.height > 0 else { return nil }
+        return frame
+    }
+
+    static func constrainedFrame(_ frame: NSRect, visibleFrames: [NSRect], fallback: NSRect) -> NSRect {
+        let screen = visibleFrames.max {
+            let lhs = $0.intersection(frame), rhs = $1.intersection(frame)
+            return (lhs.isNull ? 0 : lhs.width * lhs.height) < (rhs.isNull ? 0 : rhs.width * rhs.height)
+        }
+        let visible = (screen.flatMap { $0.intersects(frame) ? $0 : nil } ?? fallback).insetBy(dx: 8, dy: 8)
+        let size = NSSize(width: min(visible.width, max(minimumSize.width, frame.width)),
+                          height: min(visible.height, max(minimumSize.height, frame.height)))
+        return NSRect(x: min(max(frame.minX, visible.minX), visible.maxX - size.width),
+                      y: min(max(frame.minY, visible.minY), visible.maxY - size.height),
+                      width: size.width, height: size.height)
+    }
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }

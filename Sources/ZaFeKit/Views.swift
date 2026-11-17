@@ -8,6 +8,27 @@ private enum Appearance {
     static let corner: CGFloat = 10
 }
 
+private extension EnvironmentValues {
+    @Entry var quickPanelHover = false
+}
+
+private struct PanelHover: ViewModifier {
+    @Environment(\.quickPanelHover) private var enabled
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.primary.opacity(enabled && isEnabled && hovering ? 0.07 : 0))
+                    .padding(-4).allowsHitTesting(false)
+            }
+            .onHover { hovering = $0 }
+            .onDisappear { hovering = false }
+    }
+}
+
 struct RecordRow: View {
     let record: LibraryRecord
     let store: LibraryStore
@@ -95,10 +116,10 @@ struct StatusArea: View {
                     Text(controller.clipboard.state == .denied ? "剪贴板访问被拒绝" : "剪贴板等待授权").font(.caption)
                     Spacer()
                     Button(controller.clipboard.state == .denied ? "重试" : "开启记录") { controller.clipboard.resumeByUser() }
-                        .controlSize(.small)
+                        .controlSize(.small).modifier(PanelHover())
                     Button("系统设置") {
                         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") { NSWorkspace.shared.open(url) }
-                    }.controlSize(.small)
+                    }.controlSize(.small).modifier(PanelHover())
                 }.padding(10).background(.quaternary.opacity(0.4))
             }
             if let notice = controller.store.notice {
@@ -108,8 +129,10 @@ struct StatusArea: View {
                     Spacer(minLength: 0)
                     Button { _ = controller.store.flush() } label: { Image(systemName: "arrow.clockwise") }
                         .help("重试保存").accessibilityLabel("重试保存")
+                        .modifier(PanelHover())
                     Button { controller.store.notice = nil } label: { Image(systemName: "xmark") }
                         .help("关闭提示").accessibilityLabel("关闭提示")
+                        .modifier(PanelHover())
                 }
                 .buttonStyle(.plain).padding(10).background(.orange.opacity(0.07))
             }
@@ -125,6 +148,7 @@ struct AddFilesMenu: View {
             Button("从剪贴板添加", systemImage: "clipboard") { controller.pasteFiles() }
         } label: { Label("添加文件", systemImage: "folder.badge.plus") }
         .help("添加文件或文件夹")
+        .modifier(PanelHover())
     }
 }
 
@@ -132,6 +156,8 @@ struct QuickPanelView: View {
     @Bindable var controller: AppController
     @FocusState private var searchFocused: Bool
     @State private var dropTargeted = false
+    @State private var hoveredRecordID: UUID?
+    @State private var hoveredFilter: LibraryFilter?
 
     var body: some View {
         Group {
@@ -140,9 +166,11 @@ struct QuickPanelView: View {
                     HStack {
                         Button("返回", systemImage: "chevron.left") { controller.closeQuickNote() }
                             .help("返回列表 Esc")
+                            .modifier(PanelHover())
                         Spacer()
                         Button { controller.newNote() } label: { Image(systemName: "square.and.pencil") }
                             .help("新建便签 ⌘N").accessibilityLabel("新建便签")
+                            .modifier(PanelHover())
                     }
                     .buttonStyle(.borderless).padding(.horizontal, 18).padding(.vertical, 14)
                     Divider()
@@ -153,7 +181,10 @@ struct QuickPanelView: View {
                 recordList
             }
         }
-        .frame(width: 460, height: 600)
+        .frame(minWidth: QuickPanel.minimumSize.width, maxWidth: .infinity,
+               minHeight: QuickPanel.minimumSize.height, maxHeight: .infinity)
+        .ignoresSafeArea(.container, edges: .top)
+        .environment(\.quickPanelHover, true)
         .background(.regularMaterial)
         .overlay { if dropTargeted { RoundedRectangle(cornerRadius: 10).stroke(.tint, lineWidth: 2).padding(4).allowsHitTesting(false) } }
         .dropDestination(for: URL.self) { urls, _ in
@@ -163,8 +194,8 @@ struct QuickPanelView: View {
             return true
         } isTargeted: { dropTargeted = $0 }
         .onReceive(NotificationCenter.default.publisher(for: .focusQuickSearch)) { _ in searchFocused = controller.quickNote == nil }
-        .onChange(of: controller.quickQuery) { _, _ in controller.quickSelection = controller.quickRecords.first?.id }
-        .onChange(of: controller.quickFilter) { _, _ in controller.quickSelection = controller.quickRecords.first?.id }
+        .onChange(of: controller.quickQuery) { _, _ in controller.quickSelection = nil }
+        .onChange(of: controller.quickFilter) { _, _ in controller.quickSelection = nil }
     }
 
     private var recordList: some View {
@@ -178,8 +209,10 @@ struct QuickPanelView: View {
                         .foregroundStyle(controller.isPinned ? .primary : .secondary)
                 }.help(controller.isPinned ? "取消固定" : "固定面板")
                     .accessibilityLabel(controller.isPinned ? "取消固定面板" : "固定面板")
+                    .modifier(PanelHover())
                 Button { controller.showManager() } label: { Image(systemName: "sidebar.left") }
                     .help("打开管理窗口").accessibilityLabel("打开管理窗口")
+                    .modifier(PanelHover())
             }
             .buttonStyle(.borderless).padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 13)
 
@@ -190,6 +223,7 @@ struct QuickPanelView: View {
                 if !controller.quickQuery.isEmpty {
                     Button { controller.quickQuery = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
                         .buttonStyle(.plain).accessibilityLabel("清除搜索")
+                        .modifier(PanelHover())
                 }
             }
             .padding(11).background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
@@ -200,20 +234,25 @@ struct QuickPanelView: View {
                     Button { controller.quickFilter = filter } label: {
                         Text(filter.label).font(.system(size: 11, weight: controller.quickFilter == filter ? .semibold : .regular))
                             .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(controller.quickFilter == filter ? Color.primary.opacity(0.08) : .clear, in: Capsule())
+                            .background(Color.primary.opacity(controller.quickFilter == filter ? 0.08 : hoveredFilter == filter ? 0.05 : 0), in: Capsule())
                     }.buttonStyle(.plain)
                         .accessibilityAddTraits(controller.quickFilter == filter ? [.isSelected] : [])
+                        .onHover { hovering in
+                            if hovering { hoveredFilter = filter }
+                            else if hoveredFilter == filter { hoveredFilter = nil }
+                        }
                 }
                 Spacer(minLength: 0)
             }.padding(.horizontal, 16).padding(.vertical, 12)
+                .onDisappear { hoveredFilter = nil }
 
             Divider()
             if controller.quickRecords.isEmpty {
                 ContentUnavailableView {
                     Label(controller.quickQuery.isEmpty ? "留住有用的内容" : "没有找到记录", systemImage: controller.quickQuery.isEmpty ? "square.stack.3d.up" : "magnifyingglass")
                 } actions: {
-                    Button("新建便签") { controller.newNote() }
-                    Button("添加文件") { controller.chooseFiles() }
+                    Button("新建便签") { controller.newNote() }.modifier(PanelHover())
+                    Button("添加文件") { controller.chooseFiles() }.modifier(PanelHover())
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollViewReader { proxy in
@@ -230,13 +269,25 @@ struct QuickPanelView: View {
                                         .onTapGesture(count: 2) { controller.activateFromQuick(record) }
                                     Button { controller.activateFromQuick(record) } label: { Image(systemName: "doc.on.doc").foregroundStyle(.secondary) }
                                         .buttonStyle(.borderless).help("复制").accessibilityLabel("复制 \(record.displayTitle)")
+                                        .modifier(PanelHover())
                                 }
                             }
                             .tag(record.id).id(record.id)
+                            .contentShape(Rectangle())
+                            .onHover { hovering in
+                                if hovering { hoveredRecordID = record.id }
+                                else if hoveredRecordID == record.id { hoveredRecordID = nil }
+                            }
+                            .listRowBackground(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.primary.opacity(hoveredRecordID == record.id && controller.quickSelection != record.id ? 0.05 : 0))
+                                    .padding(.horizontal, 4)
+                            )
                             .contextMenu { RecordMenu(record: record, controller: controller) }
                         }
                     }
                     .listStyle(.plain).scrollContentBackground(.hidden)
+                    .onDisappear { hoveredRecordID = nil }
                     .onChange(of: controller.quickSelection) { _, id in if let id { proxy.scrollTo(id) } }
                 }
             }
@@ -245,6 +296,7 @@ struct QuickPanelView: View {
             HStack(spacing: 14) {
                 Button { controller.newNote() } label: { Image(systemName: "square.and.pencil") }
                     .help("新建便签 ⌘N").accessibilityLabel("新建便签")
+                    .modifier(PanelHover())
                 AddFilesMenu(controller: controller).labelStyle(.iconOnly).menuIndicator(.hidden)
                 Spacer()
                 Text("\(controller.quickRecords.count) 项").font(.system(size: 10)).foregroundStyle(.tertiary)
@@ -253,6 +305,7 @@ struct QuickPanelView: View {
                     .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 4))
                 Button { controller.showSettings() } label: { Image(systemName: "gearshape") }
                     .help("设置").accessibilityLabel("设置")
+                    .modifier(PanelHover())
             }
             .buttonStyle(.borderless).padding(.horizontal, 18).padding(.vertical, 12)
         }
@@ -367,18 +420,23 @@ struct RecordDetailView: View {
                 Spacer()
                 if record.deletedAt != nil {
                     Button("恢复", systemImage: "arrow.uturn.backward") { controller.store.restore(record) }
+                        .modifier(PanelHover())
                     Button(role: .destructive) { confirmPermanentDelete = true } label: { Image(systemName: "trash.slash") }
                         .help("彻底删除").accessibilityLabel("彻底删除")
+                        .modifier(PanelHover())
                 } else {
                     Button { controller.store.setFavorite(record, !record.isFavorite) } label: {
                         Image(systemName: record.isFavorite ? "star.fill" : "star")
                     }.help(record.isFavorite ? "取消收藏" : "收藏").accessibilityLabel(record.isFavorite ? "取消收藏" : "收藏")
+                        .modifier(PanelHover())
                     if record.kind != .note {
                         Button { _ = controller.clipboard.copy(record) } label: { Image(systemName: "doc.on.doc") }
                             .help("复制").accessibilityLabel("复制")
+                            .modifier(PanelHover())
                     }
                     Button(role: .destructive) { controller.store.delete(record) } label: { Image(systemName: "trash") }
                         .help("删除").accessibilityLabel("删除")
+                        .modifier(PanelHover())
                 }
             }.buttonStyle(.borderless).padding(.horizontal, 24).padding(.vertical, 17)
             Divider()

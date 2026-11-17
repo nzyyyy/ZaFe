@@ -325,6 +325,83 @@ struct LibraryTests {
         #expect(pasteboard.string(forType: .string) == "保留剪贴板")
     }
 
+    @Test func quickPanelFrameValidationAndScreenConstraints() {
+        let defaults = MemoryDefaults()
+        #expect(QuickPanel.savedFrame(in: defaults) == nil)
+        for value in ["invalid", "{{0, 0}, {0, 600}}", "{{nan, 0}, {460, 600}}", "{{0, 0}, {-460, 600}}"] {
+            defaults.set(value, forKey: QuickPanel.frameKey)
+            #expect(QuickPanel.savedFrame(in: defaults) == nil)
+        }
+        let main = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let secondary = NSRect(x: -1280, y: 100, width: 1280, height: 800)
+        let frame = NSRect(x: -1000, y: 200, width: 600, height: 650)
+        defaults.set(NSStringFromRect(frame), forKey: QuickPanel.frameKey)
+        #expect(QuickPanel.savedFrame(in: defaults) == frame)
+        #expect(QuickPanel.constrainedFrame(frame, visibleFrames: [main, secondary], fallback: main) == frame)
+        let recovered = QuickPanel.constrainedFrame(frame, visibleFrames: [main], fallback: main)
+        #expect(main.insetBy(dx: 8, dy: 8).contains(recovered))
+        #expect(recovered.size == frame.size)
+        let oversized = QuickPanel.constrainedFrame(NSRect(x: -50, y: -50, width: 3000, height: 2000), visibleFrames: [main], fallback: main)
+        #expect(oversized == main.insetBy(dx: 8, dy: 8))
+        let small = QuickPanel.constrainedFrame(NSRect(x: 200, y: 200, width: 100, height: 100), visibleFrames: [main], fallback: main)
+        #expect(small.size == QuickPanel.minimumSize)
+        let partial = QuickPanel.constrainedFrame(NSRect(x: 1300, y: 800, width: 460, height: 600), visibleFrames: [main], fallback: main)
+        #expect(main.insetBy(dx: 8, dy: 8).contains(partial))
+    }
+
+    @Test func quickPanelRestoresFrameWithoutAutomaticallySelectingRecords() throws {
+        let application = NSApplication.shared
+        let library = try TestLibrary(); defer { library.clean() }
+        let store = try library.store()
+        _ = try store.capture(.text("first"))
+        _ = try store.capture(.text("second"))
+        let pasteboard = NSPasteboard(name: .init("ZaFeTests-" + UUID().uuidString))
+        defer { pasteboard.releaseGlobally() }
+        let existingWindows = Set(application.windows.map(ObjectIdentifier.init))
+        defer {
+            for window in application.windows where !existingWindows.contains(ObjectIdentifier(window)) { window.close() }
+        }
+        let screen = try #require(NSScreen.main).visibleFrame
+        let target = QuickPanel.constrainedFrame(NSRect(x: screen.midX - 260, y: screen.midY - 240, width: 520, height: 480),
+                                                visibleFrames: [screen], fallback: screen)
+        do {
+            let controller = AppController(store: store, settings: library.settings, pasteboard: pasteboard)
+            controller.clipboard.stop()
+            defer { controller.stop() }
+            controller.toggleQuickPanel()
+            #expect(controller.quickSelection == nil)
+            controller.moveQuickSelection(1)
+            #expect(controller.quickSelection == controller.quickRecords.first?.id)
+            controller.moveQuickSelection(1)
+            #expect(controller.quickSelection == controller.quickRecords.last?.id)
+            controller.moveQuickSelection(-1)
+            #expect(controller.quickSelection == controller.quickRecords.first?.id)
+            let panel = try #require(application.windows.first { $0 is QuickPanel && $0.delegate === controller })
+            #expect(panel.styleMask.contains(.resizable))
+            panel.setFrame(target, display: false)
+            controller.windowDidEndLiveResize(Notification(name: NSWindow.didEndLiveResizeNotification, object: panel))
+            #expect(QuickPanel.savedFrame(in: library.settings.defaults) == target)
+            controller.newNote()
+            #expect(panel.frame == target)
+            controller.closeQuickNote()
+            #expect(panel.frame == target)
+            controller.closeQuickPanel(returnFocus: false)
+            controller.toggleQuickPanel()
+            #expect(panel.frame == target)
+            #expect(controller.quickSelection == nil)
+            controller.closeQuickPanel(returnFocus: false)
+        }
+        let settings = AppSettings(defaults: library.settings.defaults)
+        let controller = AppController(store: store, settings: settings, pasteboard: pasteboard)
+        controller.clipboard.stop()
+        defer { controller.stop() }
+        controller.toggleQuickPanel()
+        #expect(controller.quickSelection == nil)
+        let panel = try #require(application.windows.first { $0 is QuickPanel && $0.delegate === controller })
+        #expect(panel.frame == target)
+        controller.closeQuickPanel(returnFocus: false)
+    }
+
     @Test func notesDoNotWriteToClipboard() throws {
         let library = try TestLibrary(); defer { library.clean() }
         let store = try library.store()
