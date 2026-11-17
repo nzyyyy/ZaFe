@@ -16,6 +16,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     var quickFilter: LibraryFilter = .all
     var quickQuery = ""
     var quickSelection: UUID?
+    var quickNoteID: UUID?
     var isPinned = false
     @ObservationIgnored private var panel: QuickPanel?
     @ObservationIgnored private var mainWindow: NSWindow?
@@ -27,10 +28,10 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     @ObservationIgnored private var previewURLs: [URL] = []
     @ObservationIgnored var statusItem: NSStatusItem?
 
-    init(store: LibraryStore, settings: AppSettings) {
+    init(store: LibraryStore, settings: AppSettings, pasteboard: NSPasteboard = .general) {
         self.store = store
         self.settings = settings
-        clipboard = ClipboardMonitor(store: store)
+        clipboard = ClipboardMonitor(store: store, pasteboard: pasteboard)
         super.init()
         nextResponder = NSApp
         hotKey.onPress = { [weak self] in self?.toggleQuickPanel() }
@@ -58,6 +59,9 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
 
     var quickRecords: [LibraryRecord] { store.visibleRecords(query: quickQuery, filter: quickFilter) }
     var mainRecords: [LibraryRecord] { store.visibleRecords(query: mainQuery, filter: mainFilter ?? .all) }
+    var quickNote: LibraryRecord? {
+        store.records.first { $0.id == quickNoteID && $0.kind == .note && $0.deletedAt == nil }
+    }
 
     required init?(coder: NSCoder) { return nil }
 
@@ -69,15 +73,19 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
     }
 
-    private func handleKey(_ event: NSEvent) -> NSEvent? {
+    func handleKey(_ event: NSEvent) -> NSEvent? {
         if NSApp.keyWindow === panel {
             guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return event }
+            if quickNote != nil {
+                if event.keyCode == 53 { closeQuickNote(); return nil }
+                return event
+            }
             switch event.keyCode {
             case 53: closeQuickPanel(); return nil
             case 125: moveQuickSelection(1); return nil
             case 126: moveQuickSelection(-1); return nil
             case 36, 76:
-                if let record = quickRecords.first(where: { $0.id == quickSelection }) ?? quickRecords.first { copyFromQuick(record) }
+                if let record = quickRecords.first(where: { $0.id == quickSelection }) ?? quickRecords.first { activateFromQuick(record) }
                 return nil
             default: return event
             }
@@ -100,6 +108,11 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
 
     func toggleQuickPanel() {
         if panel?.isVisible == true { closeQuickPanel(); return }
+        showQuickPanel()
+    }
+
+    private func showQuickPanel() {
+        if panel?.isVisible == true { panel?.makeKeyAndOrderFront(nil); return }
         if let application = NSWorkspace.shared.frontmostApplication, application.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             previousApplication = application
         }
@@ -122,7 +135,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
             panel = window
         }
         quickQuery = ""
-        quickSelection = quickRecords.first?.id
+        quickSelection = quickNote?.id ?? quickRecords.first?.id
         positionPanel()
         panel?.makeKeyAndOrderFront(nil)
         NotificationCenter.default.post(name: .focusQuickSearch, object: nil)
@@ -140,18 +153,24 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     }
 
     func closeQuickPanel(returnFocus: Bool = true) {
+        panel?.makeFirstResponder(nil)
+        guard store.flush() else { return }
         panel?.orderOut(nil)
         if returnFocus, let previousApplication, previousApplication.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             previousApplication.activate()
         }
     }
 
-    func copyFromQuick(_ record: LibraryRecord) {
-        if clipboard.copy(record), !isPinned { closeQuickPanel() }
+    func activateFromQuick(_ record: LibraryRecord) {
+        if record.kind == .note { showNote(record) }
+        else if clipboard.copy(record), !isPinned { closeQuickPanel() }
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        if let window = notification.object as? NSWindow, window === panel, !isPinned { panel?.orderOut(nil) }
+        if let window = notification.object as? NSWindow, window === panel {
+            window.makeFirstResponder(nil)
+            if !isPinned, store.flush() { window.orderOut(nil) }
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -197,10 +216,25 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
 
     func newNote() {
         guard let record = store.newNote() else { return }
-        mainFilter = .notes
-        mainQuery = ""
-        mainSelection = record.id
-        showManager()
+        quickFilter = .notes
+        quickQuery = ""
+        showNote(record)
+    }
+
+    func showNote(_ record: LibraryRecord) {
+        guard record.kind == .note, record.deletedAt == nil else { return }
+        panel?.makeFirstResponder(nil)
+        guard store.flush() else { return }
+        quickSelection = record.id
+        quickNoteID = record.id
+        showQuickPanel()
+    }
+
+    func closeQuickNote() {
+        panel?.makeFirstResponder(nil)
+        guard store.flush() else { return }
+        quickNoteID = nil
+        NotificationCenter.default.post(name: .focusQuickSearch, object: nil)
     }
 
     func chooseFiles() {

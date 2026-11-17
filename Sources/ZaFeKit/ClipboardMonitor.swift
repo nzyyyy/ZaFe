@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import ImageIO
 import Observation
 
@@ -113,8 +114,20 @@ final class ClipboardMonitor {
                 objects = [paths as NSString]
             } else {
                 switch record.kind {
-                case .text, .note: objects = [record.body as NSString]
-                case .files: objects = try store.resolvedFiles(for: record).map { $0 as NSURL }
+                case .text: objects = [record.body as NSString]
+                case .note: return false
+                case .files:
+                    let urls = try store.resolvedFiles(for: record)
+                    // Opening without reading lets macOS request protected-folder access before sharing the URLs.
+                    for url in urls {
+                        let descriptor = open(url.path, O_RDONLY | O_CLOEXEC)
+                        guard descriptor >= 0 else {
+                            let code: CocoaError.Code = errno == EACCES || errno == EPERM ? .fileReadNoPermission : .fileReadUnknown
+                            throw CocoaError(code, userInfo: [NSFilePathErrorKey: url.path])
+                        }
+                        close(descriptor)
+                    }
+                    objects = urls.map { $0 as NSURL }
                 case .image:
                     let data = try store.imageData(for: record)
                     guard let source = CGImageSourceCreateWithData(data as CFData, nil), let type = CGImageSourceGetType(source) else {
@@ -127,9 +140,14 @@ final class ClipboardMonitor {
             }
             // Validate and load everything before replacing the user's current clipboard.
             pasteboard.clearContents()
-            guard pasteboard.writeObjects(objects) else { throw CocoaError(.fileWriteUnknown) }
+            guard pasteboard.writeObjects(objects), pasteboard.pasteboardItems?.count == objects.count else {
+                throw CocoaError(.fileWriteUnknown)
+            }
             tracker.didWrite(changeCount: pasteboard.changeCount)
             return true
+        } catch let error as CocoaError where error.code == .fileReadNoPermission {
+            store.notice = "无权读取文件。请在系统设置的“隐私与安全性 → 文件与文件夹”中允许 ZaFe 访问，或重新选择该文件。"
+            return false
         } catch { store.notice = error.localizedDescription; return false }
     }
 }

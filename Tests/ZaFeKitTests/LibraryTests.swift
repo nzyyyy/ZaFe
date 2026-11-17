@@ -126,8 +126,15 @@ struct LibraryTests {
             let note = try #require(store.records.first { $0.id == noteID })
             #expect(note.title == "标题")
             #expect(note.body == "长期内容\n第二行")
+            store.updateNote(note, title: "修改后的标题", body: "再次编辑\n保留换行")
             let image = try #require(store.records.first { $0.id == imageID })
             #expect(try store.imageData(for: image) == png)
+        }
+        try autoreleasepool {
+            let store = try library.store(inMemory: false)
+            let note = try #require(store.records.first { $0.id == noteID })
+            #expect(note.title == "修改后的标题")
+            #expect(note.body == "再次编辑\n保留换行")
         }
     }
 
@@ -256,9 +263,12 @@ struct LibraryTests {
         #expect(pasteboard.data(forType: .png) == png)
         if case .image(let data) = try ClipboardMonitor.read(from: pasteboard) { #expect(data == png) }
         else { Issue.record("Expected an image clipboard snapshot") }
-        let urls = try [library.file("one.txt"), library.file("two.txt")]
+        let folder = library.root.appendingPathComponent("folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let urls = try [library.file("文件 with spaces.txt"), library.file("two.txt"), folder]
         let files = try store.capture(.files(urls))
-        #expect(monitor.copy(files))
+        let copiedFiles = monitor.copy(files)
+        #expect(copiedFiles)
         let pasted = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]
         #expect(pasted?.map { $0.standardizedFileURL.resolvingSymlinksInPath().path } == urls.map(\.path))
         if case .files(let files) = try ClipboardMonitor.read(from: pasteboard) {
@@ -266,6 +276,68 @@ struct LibraryTests {
         } else { Issue.record("Expected a grouped file clipboard snapshot") }
         #expect(monitor.copy(files, pathsOnly: true))
         #expect(pasteboard.string(forType: .string) == urls.map(\.path).joined(separator: "\n"))
+    }
+
+    @Test func quickNotesStayInPanelAndEditingKeysDoNotActivateListActions() throws {
+        let application = NSApplication.shared
+        let library = try TestLibrary(); defer { library.clean() }
+        let store = try library.store()
+        let pasteboard = NSPasteboard(name: .init("ZaFeTests-" + UUID().uuidString))
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.setString("保留剪贴板", forType: .string)
+        let existingWindows = Set(application.windows.map(ObjectIdentifier.init))
+        let controller = AppController(store: store, settings: library.settings, pasteboard: pasteboard)
+        controller.clipboard.stop()
+        defer {
+            controller.stop()
+            for window in application.windows where !existingWindows.contains(ObjectIdentifier(window)) { window.close() }
+        }
+        controller.newNote()
+        let note = try #require(controller.quickNote)
+        let windows = application.windows.filter { !existingWindows.contains(ObjectIdentifier($0)) }
+        #expect(windows.count == 1)
+        let panel = try #require(windows.first as? QuickPanel)
+        #expect(panel.isVisible)
+        try #require(application.keyWindow === panel)
+        #expect(controller.quickSelection == note.id)
+        for code: UInt16 in [36, 76, 125, 126] {
+            let event = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                    windowNumber: panel.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: code))
+            #expect(controller.handleKey(event) === event)
+            #expect(controller.quickNote?.id == note.id)
+        }
+        store.updateNote(note, title: "标题", body: "正文\n第二行")
+        controller.closeQuickNote()
+        #expect(controller.quickNote == nil)
+        #expect(panel.isVisible)
+        controller.activateFromQuick(note)
+        #expect(controller.quickNote?.body == "正文\n第二行")
+        let escape = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                 windowNumber: panel.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        #expect(controller.handleKey(escape) == nil)
+        #expect(controller.quickNote == nil)
+        #expect(panel.isVisible)
+        controller.showNote(note)
+        store.delete(note)
+        #expect(controller.quickNote == nil)
+        #expect(store.visibleRecords(query: "", filter: .notes).isEmpty)
+        #expect(store.visibleRecords(query: "", filter: .trash).first?.id == note.id)
+        #expect(pasteboard.string(forType: .string) == "保留剪贴板")
+    }
+
+    @Test func notesDoNotWriteToClipboard() throws {
+        let library = try TestLibrary(); defer { library.clean() }
+        let store = try library.store()
+        let note = try #require(store.newNote())
+        let pasteboard = NSPasteboard(name: .init("ZaFeTests-" + UUID().uuidString))
+        defer { pasteboard.releaseGlobally() }
+        let monitor = ClipboardMonitor(store: store, pasteboard: pasteboard, accessPolicy: { .allowed })
+        pasteboard.setString("保留剪贴板", forType: .string)
+        let changeCount = pasteboard.changeCount
+        store.updateNote(note, title: "标题", body: "正文\n第二行")
+        #expect(!monitor.copy(note))
+        #expect(pasteboard.changeCount == changeCount)
+        #expect(pasteboard.string(forType: .string) == "保留剪贴板")
     }
 
     @Test func invalidCopyDoesNotEraseCurrentClipboard() throws {
@@ -280,6 +352,32 @@ struct LibraryTests {
         let monitor = ClipboardMonitor(store: store, pasteboard: pasteboard)
         #expect(!monitor.copy(record))
         #expect(pasteboard.string(forType: .string) == "keep clipboard")
+    }
+
+    @Test func unreadableFileCopyPreservesClipboardAndRecoversWhenAccessReturns() throws {
+        let library = try TestLibrary(); defer { library.clean() }
+        let store = try library.store()
+        let file = try library.file()
+        let record = try #require(store.addFiles([file]))
+        let pasteboard = NSPasteboard(name: .init("ZaFeTests-" + UUID().uuidString))
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.setString("keep clipboard", forType: .string)
+        let changeCount = pasteboard.changeCount
+        let monitor = ClipboardMonitor(store: store, pasteboard: pasteboard, accessPolicy: { .allowed })
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
+        try #require(!FileManager.default.isReadableFile(atPath: file.path))
+        let copiedWithoutAccess = monitor.copy(record)
+        #expect(!copiedWithoutAccess)
+        #expect(pasteboard.changeCount == changeCount)
+        #expect(pasteboard.string(forType: .string) == "keep clipboard")
+        #expect(store.notice != nil)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        #expect(monitor.copy(record))
+        let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]
+        #expect(urls?.map { $0.standardizedFileURL.resolvingSymlinksInPath().path } == [file.path])
+        monitor.poll()
+        #expect(store.records.count == 1)
     }
 
     @Test func deniedAndAskPoliciesNeverReadAutomaticallyAndCanRecover() throws {

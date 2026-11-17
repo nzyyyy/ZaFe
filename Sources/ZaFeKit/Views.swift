@@ -65,7 +65,11 @@ struct RecordMenu: View {
         if record.deletedAt != nil {
             Button("恢复", systemImage: "arrow.uturn.backward") { controller.store.restore(record) }
         } else {
-            Button("复制", systemImage: "doc.on.doc") { _ = controller.clipboard.copy(record) }
+            if record.kind == .note {
+                Button("查看与编辑", systemImage: "square.and.pencil") { controller.showNote(record) }
+            } else {
+                Button("复制", systemImage: "doc.on.doc") { _ = controller.clipboard.copy(record) }
+            }
             if record.kind == .files {
                 Button("打开", systemImage: "arrow.up.forward.app") { controller.openFile(record) }
                 Button("快速查看", systemImage: "eye") { controller.preview(record) }
@@ -130,6 +134,40 @@ struct QuickPanelView: View {
     @State private var dropTargeted = false
 
     var body: some View {
+        Group {
+            if let note = controller.quickNote {
+                VStack(spacing: 0) {
+                    HStack {
+                        Button("返回", systemImage: "chevron.left") { controller.closeQuickNote() }
+                            .help("返回列表 Esc")
+                        Spacer()
+                        Button { controller.newNote() } label: { Image(systemName: "square.and.pencil") }
+                            .help("新建便签 ⌘N").accessibilityLabel("新建便签")
+                    }
+                    .buttonStyle(.borderless).padding(.horizontal, 18).padding(.vertical, 14)
+                    Divider()
+                    RecordDetailView(record: note, controller: controller).id(note.id)
+                    StatusArea(controller: controller)
+                }
+            } else {
+                recordList
+            }
+        }
+        .frame(width: 460, height: 600)
+        .background(.regularMaterial)
+        .overlay { if dropTargeted { RoundedRectangle(cornerRadius: 10).stroke(.tint, lineWidth: 2).padding(4).allowsHitTesting(false) } }
+        .dropDestination(for: URL.self) { urls, _ in
+            let files = urls.filter(\.isFileURL)
+            guard !files.isEmpty else { return false }
+            controller.addFiles(files)
+            return true
+        } isTargeted: { dropTargeted = $0 }
+        .onReceive(NotificationCenter.default.publisher(for: .focusQuickSearch)) { _ in searchFocused = controller.quickNote == nil }
+        .onChange(of: controller.quickQuery) { _, _ in controller.quickSelection = controller.quickRecords.first?.id }
+        .onChange(of: controller.quickFilter) { _, _ in controller.quickSelection = controller.quickRecords.first?.id }
+    }
+
+    private var recordList: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "square.stack.3d.up").font(.system(size: 17, weight: .medium))
@@ -182,12 +220,19 @@ struct QuickPanelView: View {
                     List(selection: $controller.quickSelection) {
                         ForEach(controller.quickRecords) { record in
                             HStack(spacing: 6) {
-                                RecordRow(record: record, store: controller.store, compact: true)
-                                Button { controller.copyFromQuick(record) } label: { Image(systemName: "doc.on.doc").foregroundStyle(.secondary) }
-                                    .buttonStyle(.borderless).help("复制").accessibilityLabel("复制 \(record.displayTitle)")
+                                if record.kind == .note {
+                                    Button { controller.showNote(record) } label: {
+                                        RecordRow(record: record, store: controller.store, compact: true)
+                                    }
+                                    .buttonStyle(.plain).help("查看与编辑便签")
+                                } else {
+                                    RecordRow(record: record, store: controller.store, compact: true)
+                                        .onTapGesture(count: 2) { controller.activateFromQuick(record) }
+                                    Button { controller.activateFromQuick(record) } label: { Image(systemName: "doc.on.doc").foregroundStyle(.secondary) }
+                                        .buttonStyle(.borderless).help("复制").accessibilityLabel("复制 \(record.displayTitle)")
+                                }
                             }
                             .tag(record.id).id(record.id)
-                            .onTapGesture(count: 2) { controller.copyFromQuick(record) }
                             .contextMenu { RecordMenu(record: record, controller: controller) }
                         }
                     }
@@ -211,19 +256,7 @@ struct QuickPanelView: View {
             }
             .buttonStyle(.borderless).padding(.horizontal, 18).padding(.vertical, 12)
         }
-        .frame(width: 460, height: 600)
-        .background(.regularMaterial)
-        .overlay { if dropTargeted { RoundedRectangle(cornerRadius: 10).stroke(.tint, lineWidth: 2).padding(4).allowsHitTesting(false) } }
-        .dropDestination(for: URL.self) { urls, _ in
-            let files = urls.filter(\.isFileURL)
-            guard !files.isEmpty else { return false }
-            controller.addFiles(files)
-            return true
-        } isTargeted: { dropTargeted = $0 }
         .onAppear { searchFocused = true }
-        .onReceive(NotificationCenter.default.publisher(for: .focusQuickSearch)) { _ in searchFocused = true }
-        .onChange(of: controller.quickQuery) { _, _ in controller.quickSelection = controller.quickRecords.first?.id }
-        .onChange(of: controller.quickFilter) { _, _ in controller.quickSelection = controller.quickRecords.first?.id }
     }
 }
 
@@ -278,8 +311,10 @@ struct ManagerView: View {
                         RecordRow(record: record, store: controller.store).tag(record.id)
                             .contextMenu { RecordMenu(record: record, controller: controller) }
                             .onTapGesture(count: 2) {
+                                controller.mainSelection = record.id
                                 if record.deletedAt == nil, record.kind == .files { controller.openFile(record) }
                             }
+                            .onTapGesture { controller.mainSelection = record.id }
                     }.listStyle(.inset).scrollContentBackground(.hidden)
                 }
                 StatusArea(controller: controller)
@@ -338,8 +373,10 @@ struct RecordDetailView: View {
                     Button { controller.store.setFavorite(record, !record.isFavorite) } label: {
                         Image(systemName: record.isFavorite ? "star.fill" : "star")
                     }.help(record.isFavorite ? "取消收藏" : "收藏").accessibilityLabel(record.isFavorite ? "取消收藏" : "收藏")
-                    Button { _ = controller.clipboard.copy(record) } label: { Image(systemName: "doc.on.doc") }
-                        .help("复制").accessibilityLabel("复制")
+                    if record.kind != .note {
+                        Button { _ = controller.clipboard.copy(record) } label: { Image(systemName: "doc.on.doc") }
+                            .help("复制").accessibilityLabel("复制")
+                    }
                     Button(role: .destructive) { controller.store.delete(record) } label: { Image(systemName: "trash") }
                         .help("删除").accessibilityLabel("删除")
                 }
