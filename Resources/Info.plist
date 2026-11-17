@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>ZaFe</string>
+    <key>CFBundleIdentifier</key><string>dev.zafe.local</string>
+    <key>CFBundleName</key><string>ZaFe</string>
+    <key>CFBundleDisplayName</key><string>ZaFe</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+    <key>LSMinimumSystemVersion</key><string>15.4</string>
+    <key>LSUIElement</key><true/>
+    <key>LSMultipleInstancesProhibited</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSDocumentsFolderUsageDescription</key><string>打开你主动收藏的文稿。</string>
+    <key>NSDesktopFolderUsageDescription</key><string>打开你主动收藏的桌面文件。</string>
+    <key>NSDownloadsFolderUsageDescription</key><string>打开你主动收藏的下载文件。</string>
+</dict>
+</plist>
