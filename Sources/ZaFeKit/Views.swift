@@ -29,6 +29,44 @@ private struct PanelHover: ViewModifier {
     }
 }
 
+private struct ClearScrollTrack: NSViewRepresentable {
+    func makeNSView(context: Context) -> Attachment { Attachment() }
+    func updateNSView(_ nsView: Attachment, context: Context) {}
+
+    final class Attachment: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil else { return }
+            // Wait for SwiftUI to attach the list's AppKit scroll view.
+            Task { @MainActor [weak self] in
+                guard let content = self?.window?.contentView,
+                      let scrollView = Self.firstScrollView(in: content),
+                      let current = scrollView.verticalScroller,
+                      !(current is TracklessScroller) else { return }
+
+                let scroller = TracklessScroller(frame: current.frame)
+                scroller.controlSize = current.controlSize
+                scrollView.verticalScroller = scroller
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
+        }
+
+        private static func firstScrollView(in view: NSView) -> NSScrollView? {
+            if let scrollView = view as? NSScrollView { return scrollView }
+            for subview in view.subviews {
+                if let scrollView = firstScrollView(in: subview) { return scrollView }
+            }
+            return nil
+        }
+    }
+}
+
+private final class TracklessScroller: NSScroller {
+    override class var isCompatibleWithOverlayScrollers: Bool { true }
+    override var isOpaque: Bool { false }
+    override func drawKnobSlot(in slotRect: NSRect, highlight flag: Bool) {}
+}
+
 struct RecordRow: View {
     let record: LibraryRecord
     let store: LibraryStore
@@ -53,7 +91,7 @@ struct RecordRow: View {
                     Text(record.displayTitle).font(.system(size: 13, weight: .medium)).lineLimit(1)
                     if record.isFavorite { Image(systemName: "star.fill").font(.system(size: 9)).foregroundStyle(.secondary) }
                 }
-                Text(record.subtitle.isEmpty ? record.kind.label : record.subtitle)
+                Text(subtitle)
                     .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(compact ? 1 : 2)
             }
             Spacer(minLength: 3)
@@ -65,6 +103,15 @@ struct RecordRow: View {
         .padding(.vertical, compact ? 5 : 8)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+    }
+
+    private var subtitle: String {
+        if compact, record.kind == .text, record.isClipboard {
+            let copiedAt = record.lastCopiedAt ?? record.touchedAt
+            return "复制于 \(copiedAt.formatted(.dateTime.year().month().day().hour().minute().second()))"
+        }
+        let subtitle = record.subtitle
+        return subtitle.isEmpty ? record.kind.label : subtitle
     }
 
     private var thumbnail: NSImage? {
@@ -87,7 +134,7 @@ struct RecordMenu: View {
             Button("恢复", systemImage: "arrow.uturn.backward") { controller.store.restore(record) }
         } else {
             if record.kind == .note {
-                Button("查看与编辑", systemImage: "square.and.pencil") { controller.showNote(record) }
+                Button("查看与编辑", systemImage: "square.and.pencil") { controller.showQuickDetail(record) }
             } else {
                 Button("复制", systemImage: "doc.on.doc") { _ = controller.clipboard.copy(record) }
             }
@@ -163,10 +210,10 @@ struct QuickPanelView: View {
 
     var body: some View {
         Group {
-            if let note = controller.quickNote {
+            if let record = controller.quickDetail {
                 VStack(spacing: 0) {
                     HStack {
-                        Button("返回", systemImage: "chevron.left") { controller.closeQuickNote() }
+                        Button("返回", systemImage: "chevron.left") { controller.closeQuickDetail() }
                             .help("返回列表 Esc")
                             .modifier(PanelHover())
                         Spacer()
@@ -178,7 +225,7 @@ struct QuickPanelView: View {
                     .buttonStyle(.borderless).padding(.horizontal, 18).padding(.vertical, 14)
                     appearanceControls
                     Divider()
-                    RecordDetailView(record: note, controller: controller, showsBackground: false).id(note.id)
+                    RecordDetailView(record: record, controller: controller, showsBackground: false).id(record.id)
                     StatusArea(controller: controller)
                 }
             } else {
@@ -196,11 +243,21 @@ struct QuickPanelView: View {
             controller.addFiles(files)
             return true
         } isTargeted: { dropTargeted = $0 }
-        .onReceive(NotificationCenter.default.publisher(for: .focusQuickSearch)) { _ in searchFocused = controller.quickNote == nil }
-        .onChange(of: controller.quickQuery) { _, _ in controller.quickSelection = nil }
-        .onChange(of: controller.quickFilter) { _, _ in controller.quickSelection = nil }
+        .onReceive(NotificationCenter.default.publisher(for: .focusQuickSearch)) { _ in
+            searchFocused = controller.quickDetail == nil && !controller.isAdjustingPanelAppearance
+        }
+        .onChange(of: controller.quickDetail?.id) { _, id in
+            if id == nil { controller.closeQuickDetail() }
+            searchFocused = id == nil && !controller.isAdjustingPanelAppearance
+        }
+        .onChange(of: controller.quickQuery) { _, _ in
+            if controller.quickDetail == nil { controller.quickSelection = nil }
+        }
+        .onChange(of: controller.quickFilter) { _, _ in
+            if controller.quickDetail == nil { controller.quickSelection = nil }
+        }
         .onChange(of: controller.isAdjustingPanelAppearance) { _, expanded in
-            searchFocused = !expanded && controller.quickNote == nil
+            searchFocused = !expanded && controller.quickDetail == nil
             appearanceFocused = expanded && !reduceTransparency
         }
     }
@@ -300,14 +357,17 @@ struct QuickPanelView: View {
                     List(selection: $controller.quickSelection) {
                         ForEach(controller.quickRecords) { record in
                             HStack(spacing: 6) {
-                                if record.kind == .note {
-                                    Button { controller.showNote(record) } label: {
+                                if record.kind == .note || record.isClipboard {
+                                    Button { controller.showQuickDetail(record) } label: {
                                         RecordRow(record: record, store: controller.store, compact: true)
                                     }
-                                    .buttonStyle(.plain).help("查看与编辑便签")
+                                    .buttonStyle(.plain)
+                                    .help(record.kind == .note ? "查看与编辑便签" : "查看详情")
                                 } else {
                                     RecordRow(record: record, store: controller.store, compact: true)
                                         .onTapGesture(count: 2) { controller.activateFromQuick(record) }
+                                }
+                                if record.kind != .note {
                                     Button { controller.activateFromQuick(record) } label: { Image(systemName: "doc.on.doc").foregroundStyle(.secondary) }
                                         .buttonStyle(.borderless).help("复制").accessibilityLabel("复制 \(record.displayTitle)")
                                         .modifier(PanelHover())
@@ -328,8 +388,9 @@ struct QuickPanelView: View {
                         }
                     }
                     .listStyle(.plain).scrollContentBackground(.hidden)
+                    .background { ClearScrollTrack().frame(width: 0, height: 0) }
                     .onDisappear { hoveredRecordID = nil }
-                    .onChange(of: controller.quickSelection) { _, id in if let id { proxy.scrollTo(id) } }
+                    .onChange(of: controller.quickSelection, initial: true) { _, id in if let id { proxy.scrollTo(id) } }
                 }
             }
             StatusArea(controller: controller)

@@ -93,6 +93,7 @@ final class LibraryRecord {
     var byteCount: Int
     var createdAt: Date
     var touchedAt: Date
+    var lastCopiedAt: Date?
     var isFavorite: Bool
     var deletedAt: Date?
 
@@ -109,6 +110,7 @@ final class LibraryRecord {
         self.byteCount = byteCount
         createdAt = now
         touchedAt = now
+        lastCopiedAt = isClipboard ? now : nil
         isFavorite = false
     }
 

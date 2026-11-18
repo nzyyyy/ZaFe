@@ -105,10 +105,16 @@ final class LibraryStore {
         }
         let fingerprint = payload.fingerprint
         if let existing = records.first(where: { $0.isClipboard && $0.deletedAt == nil && $0.fingerprint == fingerprint }) {
-            let previous = existing.touchedAt
+            let previousTouchedAt = existing.touchedAt
+            let previousCopiedAt = existing.lastCopiedAt
             existing.touchedAt = now
+            existing.lastCopiedAt = now
             do { try context.save() }
-            catch { existing.touchedAt = previous; throw error }
+            catch {
+                existing.touchedAt = previousTouchedAt
+                existing.lastCopiedAt = previousCopiedAt
+                throw error
+            }
             cleanup(now: now)
             return existing
         }
@@ -209,7 +215,11 @@ final class LibraryStore {
     }
 
     func restore(_ record: LibraryRecord) {
-        _ = change { record.deletedAt = nil; record.touchedAt = .now }
+        _ = change {
+            if record.isClipboard, record.lastCopiedAt == nil { record.lastCopiedAt = record.touchedAt }
+            record.deletedAt = nil
+            record.touchedAt = .now
+        }
     }
 
     func permanentlyDelete(_ records: [LibraryRecord]) {

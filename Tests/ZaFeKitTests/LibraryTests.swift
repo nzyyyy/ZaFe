@@ -54,16 +54,48 @@ struct LibraryTests {
         let library = try TestLibrary(); defer { library.clean() }
         let store = try library.store()
         let first = try store.capture(.text("hello"), now: now)
+        #expect(first.lastCopiedAt == now)
         let note = try #require(store.newNote())
+        #expect(note.lastCopiedAt == nil)
         store.updateNote(note, body: "hello")
         let next = try store.capture(.text("hello"), now: now.addingTimeInterval(5))
         #expect(first.id == next.id)
         #expect(next.touchedAt == now.addingTimeInterval(5))
+        #expect(next.lastCopiedAt == now.addingTimeInterval(5))
         #expect(store.records.count == 2)
         #expect(note.body == "hello")
         store.delete(next)
         let replacement = try store.capture(.text("hello"), now: now.addingTimeInterval(10))
         #expect(replacement.id != first.id)
+    }
+
+    @Test func clipboardCopyTimeSurvivesRestoreAndReopening() throws {
+        let library = try TestLibrary(); defer { library.clean() }
+        let firstCopy = Date.now.addingTimeInterval(-60)
+        let lastCopy = firstCopy.addingTimeInterval(10)
+        try autoreleasepool {
+            let store = try library.store(inMemory: false)
+            try store.capture(.text("重复文本"), now: firstCopy)
+            let record = try store.capture(.text("重复文本"), now: lastCopy)
+            store.setFavorite(record, true)
+            store.delete(record)
+            store.restore(record)
+            #expect(record.touchedAt > lastCopy)
+            #expect(record.lastCopiedAt == lastCopy)
+
+            let legacy = try store.capture(.text("旧记录"), now: firstCopy)
+            legacy.lastCopiedAt = nil
+            store.setFavorite(legacy, true)
+            store.delete(legacy)
+            store.restore(legacy)
+            #expect(legacy.lastCopiedAt == firstCopy)
+        }
+        try autoreleasepool {
+            let store = try library.store(inMemory: false)
+            #expect(store.records.count == 2)
+            #expect(store.records.first { $0.body == "重复文本" }?.lastCopiedAt == lastCopy)
+            #expect(store.records.first { $0.body == "旧记录" }?.lastCopiedAt == firstCopy)
+        }
     }
 
     @Test func cleanupEnforcesAgeCountAndBytesAndProtectsManualContent() throws {
@@ -309,7 +341,7 @@ struct LibraryTests {
             for window in application.windows where !existingWindows.contains(ObjectIdentifier(window)) { window.close() }
         }
         controller.newNote()
-        let note = try #require(controller.quickNote)
+        let note = try #require(controller.quickDetail)
         let windows = application.windows.filter { !existingWindows.contains(ObjectIdentifier($0)) }
         #expect(windows.count == 1)
         let panel = try #require(windows.first as? QuickPanel)
@@ -322,31 +354,88 @@ struct LibraryTests {
                 let event = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                                                         windowNumber: panel.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: code))
                 #expect(controller.handleKey(event) === event)
-                #expect(controller.quickNote?.id == note.id)
+                #expect(controller.quickDetail?.id == note.id)
             }
         }
         let appearanceEscape = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                                                            windowNumber: panel.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
         #expect(controller.handleKey(appearanceEscape) == nil)
         #expect(!controller.isAdjustingPanelAppearance)
-        #expect(controller.quickNote?.id == note.id)
+        #expect(controller.quickDetail?.id == note.id)
         store.updateNote(note, title: "标题", body: "正文\n第二行")
-        controller.closeQuickNote()
-        #expect(controller.quickNote == nil)
+        controller.closeQuickDetail()
+        #expect(controller.quickDetail == nil)
         #expect(panel.isVisible)
         controller.activateFromQuick(note)
-        #expect(controller.quickNote?.body == "正文\n第二行")
+        #expect(controller.quickDetail?.body == "正文\n第二行")
         let escape = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                                                  windowNumber: panel.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
         #expect(controller.handleKey(escape) == nil)
-        #expect(controller.quickNote == nil)
+        #expect(controller.quickDetail == nil)
         #expect(panel.isVisible)
-        controller.showNote(note)
+        controller.showQuickDetail(note)
         store.delete(note)
-        #expect(controller.quickNote == nil)
+        #expect(controller.quickDetail == nil)
         #expect(store.visibleRecords(query: "", filter: .notes).isEmpty)
         #expect(store.visibleRecords(query: "", filter: .trash).first?.id == note.id)
         #expect(pasteboard.string(forType: .string) == "保留剪贴板")
+    }
+
+    @Test func clipboardDetailsStayInPanelAndListReturnCopies() throws {
+        let application = NSApplication.shared
+        let library = try TestLibrary(); defer { library.clean() }
+        let store = try library.store()
+        let text = try store.capture(.text("标题\n完整正文"))
+        let image = try store.capture(.image(samplePNG()))
+        let files = try store.capture(.files([library.file()]))
+        let pasteboard = NSPasteboard(name: .init("ZaFeTests-" + UUID().uuidString))
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.setString("保留剪贴板", forType: .string)
+        let changeCount = pasteboard.changeCount
+        let controller = AppController(store: store, settings: library.settings, pasteboard: pasteboard)
+        controller.clipboard.stop()
+        defer {
+            controller.stop()
+            for window in application.windows where window.delegate === controller { window.close() }
+        }
+        controller.isPinned = true
+        controller.toggleQuickPanel()
+        let panel = try #require(application.windows.first { $0 is QuickPanel && $0.delegate === controller })
+        controller.quickFilter = .clipboard
+        for record in [image, files] {
+            controller.showQuickDetail(record)
+            #expect(controller.quickDetail?.id == record.id)
+            #expect(panel.isVisible)
+            #expect(pasteboard.changeCount == changeCount)
+            controller.closeQuickDetail()
+            #expect(controller.quickDetail == nil)
+        }
+
+        controller.quickQuery = "完整正文"
+        controller.showQuickDetail(text)
+        #expect(controller.quickDetail?.id == text.id)
+        #expect(application.windows.filter { $0.delegate === controller } == [panel])
+        #expect(pasteboard.string(forType: .string) == "保留剪贴板")
+        try #require(application.keyWindow === panel)
+        let escape = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                   windowNumber: panel.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        let enter = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                  windowNumber: panel.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+        #expect(controller.handleKey(enter) === enter)
+        #expect(pasteboard.changeCount == changeCount)
+        #expect(controller.handleKey(escape) == nil)
+        #expect(controller.quickDetail == nil)
+        #expect(controller.quickSelection == text.id)
+        #expect(controller.quickFilter == .clipboard)
+        #expect(controller.quickQuery == "完整正文")
+        #expect(panel.isVisible)
+        #expect(controller.handleKey(enter) == nil)
+        #expect(pasteboard.string(forType: .string) == text.body)
+
+        controller.showQuickDetail(text)
+        store.delete(text)
+        #expect(controller.quickDetail == nil)
+        #expect(panel.isVisible)
     }
 
     @Test func quickPanelFrameValidationAndScreenConstraints() {
@@ -418,7 +507,7 @@ struct LibraryTests {
             #expect(QuickPanel.savedFrame(in: library.settings.defaults) == target)
             controller.newNote()
             #expect(panel.frame == target)
-            controller.closeQuickNote()
+            controller.closeQuickDetail()
             #expect(panel.frame == target)
             controller.isAdjustingPanelAppearance = true
             library.settings.quickPanelTransparency = 0.42

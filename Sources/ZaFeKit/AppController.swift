@@ -16,7 +16,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     var quickFilter: LibraryFilter = .all
     var quickQuery = ""
     var quickSelection: UUID?
-    var quickNoteID: UUID?
+    private var quickDetailID: UUID?
     var isPinned = false
     var isAdjustingPanelAppearance = false
     @ObservationIgnored private var panel: QuickPanel?
@@ -60,8 +60,9 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
 
     var quickRecords: [LibraryRecord] { store.visibleRecords(query: quickQuery, filter: quickFilter) }
     var mainRecords: [LibraryRecord] { store.visibleRecords(query: mainQuery, filter: mainFilter ?? .all) }
-    var quickNote: LibraryRecord? {
-        store.records.first { $0.id == quickNoteID && $0.kind == .note && $0.deletedAt == nil }
+    var quickDetail: LibraryRecord? {
+        guard let quickDetailID else { return nil }
+        return store.records.first { $0.id == quickDetailID && $0.deletedAt == nil }
     }
 
     required init?(coder: NSCoder) { return nil }
@@ -82,8 +83,8 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
                 if event.keyCode == 53 { isAdjustingPanelAppearance = false; return nil }
                 return event
             }
-            if quickNote != nil {
-                if event.keyCode == 53 { closeQuickNote(); return nil }
+            if quickDetail != nil {
+                if event.keyCode == 53 { closeQuickDetail(); return nil }
                 return event
             }
             switch event.keyCode {
@@ -154,8 +155,10 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
             panel = window
             if savedFrame == nil { positionPanel() }
         }
-        quickQuery = ""
-        quickSelection = quickNote?.id
+        if quickDetail == nil {
+            quickQuery = ""
+            quickSelection = nil
+        }
         if let panel {
             let fallback = statusItem?.button?.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
                 ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -189,7 +192,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     }
 
     func activateFromQuick(_ record: LibraryRecord) {
-        if record.kind == .note { showNote(record) }
+        if record.kind == .note { showQuickDetail(record) }
         else if clipboard.copy(record), !isPinned { closeQuickPanel() }
     }
 
@@ -269,23 +272,26 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
         guard let record = store.newNote() else { return }
         quickFilter = .notes
         quickQuery = ""
-        showNote(record)
+        showQuickDetail(record)
     }
 
-    func showNote(_ record: LibraryRecord) {
-        guard record.kind == .note, record.deletedAt == nil else { return }
+    func showQuickDetail(_ record: LibraryRecord) {
+        guard record.deletedAt == nil, record.kind == .note || record.isClipboard else { return }
         panel?.makeFirstResponder(nil)
         guard store.flush() else { return }
         quickSelection = record.id
-        quickNoteID = record.id
+        quickDetailID = record.id
         showQuickPanel()
     }
 
-    func closeQuickNote() {
-        panel?.makeFirstResponder(nil)
-        guard store.flush() else { return }
-        quickNoteID = nil
-        NotificationCenter.default.post(name: .focusQuickSearch, object: nil)
+    func closeQuickDetail() {
+        guard let id = quickDetailID else { return }
+        if quickDetail != nil {
+            panel?.makeFirstResponder(nil)
+            guard store.flush() else { return }
+        }
+        quickDetailID = nil
+        quickSelection = quickRecords.contains { $0.id == id } ? id : nil
     }
 
     func chooseFiles() {
