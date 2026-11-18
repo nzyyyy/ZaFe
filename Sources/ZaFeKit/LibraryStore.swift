@@ -215,11 +215,29 @@ final class LibraryStore {
     }
 
     func restore(_ record: LibraryRecord) {
+        restore([record.id])
+    }
+
+    func restore(_ ids: Set<UUID>) {
+        let trashed = trashedRecords(withIDs: ids)
+        guard !trashed.isEmpty else { return }
+        let now = Date.now
         _ = change {
-            if record.isClipboard, record.lastCopiedAt == nil { record.lastCopiedAt = record.touchedAt }
-            record.deletedAt = nil
-            record.touchedAt = .now
+            for record in trashed {
+                if record.isClipboard, record.lastCopiedAt == nil { record.lastCopiedAt = record.touchedAt }
+                record.deletedAt = nil
+                record.touchedAt = now
+            }
         }
+    }
+
+    func permanentlyDeleteTrashed(_ ids: Set<UUID>) {
+        let trashed = trashedRecords(withIDs: ids)
+        if !trashed.isEmpty { permanentlyDelete(trashed) }
+    }
+
+    private func trashedRecords(withIDs ids: Set<UUID>) -> [LibraryRecord] {
+        records.filter { $0.deletedAt != nil && ids.contains($0.id) }
     }
 
     func permanentlyDelete(_ records: [LibraryRecord]) {

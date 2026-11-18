@@ -97,7 +97,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
             default: return event
             }
         }
-        if NSApp.keyWindow === mainWindow, event.keyCode == 49,
+        if NSApp.keyWindow === mainWindow, mainFilter != .trash, event.keyCode == 49,
            !(NSApp.keyWindow?.firstResponder is NSTextView),
            let record = store.records.first(where: { $0.id == mainSelection }), record.kind == .files, record.deletedAt == nil {
             preview(record)
@@ -304,16 +304,17 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
         NSApp.activate()
         picker.begin { [weak self] result in
             guard result == .OK else { return }
-            MainActor.assumeIsolated { self?.addFiles(picker.urls) }
+            MainActor.assumeIsolated { _ = self?.addFiles(picker.urls) }
         }
     }
 
-    func addFiles(_ urls: [URL]) {
-        if let record = store.addFiles(urls) {
-            mainFilter = .files
-            mainQuery = ""
-            mainSelection = record.id
-        }
+    @discardableResult
+    func addFiles(_ urls: [URL]) -> Bool {
+        guard let record = store.addFiles(urls) else { return false }
+        mainFilter = .files
+        mainQuery = ""
+        mainSelection = record.id
+        return true
     }
 
     func pasteFiles() {
@@ -425,9 +426,13 @@ extension Notification.Name {
 }
 
 @MainActor
-public final class AppDelegate: NSObject, NSApplicationDelegate {
+public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSDraggingDestination {
     private var controller: AppController?
     private var statusItem: NSStatusItem?
+    private var statusDropPanel: StatusDropPanel?
+    private var dismissStatusDrop: Task<Void, Never>?
+    private var statusDragMonitor: Any?
+    private var statusDragTracking: Task<Void, Never>?
 
     public override init() { super.init() }
 
@@ -445,6 +450,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             item.button?.toolTip = "ZaFe · \(settings.hotKeyLabel)"
             statusItem = item
             controller.statusItem = item
+            item.button?.window?.delegate = self
+            item.button?.window?.registerForDraggedTypes([.fileURL])
+            statusDragMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
+                MainActor.assumeIsolated { self?.trackStatusDrag() }
+            }
             installMenu()
         } catch {
             let alert = NSAlert()
@@ -454,6 +464,108 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.runModal()
             NSApp.terminate(nil)
         }
+    }
+
+    private func trackStatusDrag() {
+        statusDragTracking?.cancel()
+        let pasteboard = NSPasteboard(name: .drag)
+        let initialChangeCount = pasteboard.changeCount
+        statusDragTracking = Task { [weak self] in
+            var checkedCount = initialChangeCount
+            var isFileDrag = false
+            while !Task.isCancelled, NSEvent.pressedMouseButtons & 1 != 0 {
+                if let self, let (anchor, visible) = self.statusDropAnchor() {
+                    let trigger = StatusDropPanel.activationFrame(below: anchor, in: visible)
+                    let pointer = NSEvent.mouseLocation
+                    if !trigger.contains(pointer) && !anchor.contains(pointer) {
+                        self.hideStatusDropPanel()
+                    } else if self.statusDropPanel?.isVisible != true {
+                        let count = pasteboard.changeCount
+                        if count != checkedCount {
+                            checkedCount = count
+                            let metadata = try? await NSPasteboard(name: .drag).detectedMetadata(for: [\.contentType])
+                            isFileDrag = count != initialChangeCount && metadata?.contentType != nil
+                        }
+                        if isFileDrag, !Task.isCancelled, NSEvent.pressedMouseButtons & 1 != 0,
+                           pasteboard.changeCount == checkedCount, trigger.contains(NSEvent.mouseLocation),
+                           self.statusDropPanel?.isVisible != true {
+                            self.showStatusDropPanel(below: anchor, in: visible)
+                        }
+                    }
+                }
+                do { try await Task.sleep(for: .milliseconds(33)) }
+                catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            self?.statusDragTracking = nil
+            self?.scheduleStatusDropDismissal()
+        }
+    }
+
+    private func statusDropAnchor() -> (NSRect, NSRect)? {
+        guard let button = statusItem?.button, let window = button.window, let screen = window.screen else { return nil }
+        return (window.convertToScreen(button.convert(button.bounds, to: nil)), screen.visibleFrame)
+    }
+
+    private func showStatusDropPanel(below anchor: NSRect, in visible: NSRect) {
+        let panel = statusDropPanel ?? StatusDropPanel()
+        panel.delegate = self
+        statusDropPanel = panel
+        dismissStatusDrop?.cancel()
+        panel.show(below: anchor, in: visible)
+    }
+
+    public func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard sender.draggingSourceOperationMask.contains(.copy),
+              sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) else { return [] }
+        dismissStatusDrop?.cancel()
+        if let panel = statusDropPanel, sender.draggingDestinationWindow === panel {
+            panel.setTargeted(true)
+        } else if let (anchor, visible) = statusDropAnchor() {
+            showStatusDropPanel(below: anchor, in: visible)
+        }
+        return .copy
+    }
+
+    public func draggingExited(_ sender: (any NSDraggingInfo)?) {
+        statusDropPanel?.setTargeted(false)
+        if statusDragTracking == nil { scheduleStatusDropDismissal() }
+    }
+
+    private func scheduleStatusDropDismissal() {
+        guard statusDropPanel?.isVisible == true else { return }
+        dismissStatusDrop?.cancel()
+        // Keep the window available until AppKit delivers the drop or enters the other window.
+        dismissStatusDrop = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(350)) }
+            catch { return }
+            self?.hideStatusDropPanel()
+        }
+    }
+
+    public func draggingEnded(_ sender: any NSDraggingInfo) {
+        finishStatusDrag()
+    }
+
+    private func finishStatusDrag() {
+        statusDragTracking?.cancel()
+        statusDragTracking = nil
+        hideStatusDropPanel()
+    }
+
+    public func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        finishStatusDrag()
+        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+              !urls.isEmpty else { return false }
+        return controller?.addFiles(urls) == true
+    }
+
+    private func hideStatusDropPanel() {
+        dismissStatusDrop?.cancel()
+        dismissStatusDrop = nil
+        guard let panel = statusDropPanel, panel.isVisible else { return }
+        panel.orderOut(nil)
+        panel.setTargeted(false)
     }
 
     private func installMenu() {
@@ -503,6 +615,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return .terminateCancel
         }
         controller?.stop()
+        if let statusDragMonitor { NSEvent.removeMonitor(statusDragMonitor) }
+        finishStatusDrag()
         return .terminateNow
     }
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

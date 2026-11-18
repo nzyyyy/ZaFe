@@ -129,6 +129,37 @@ struct LibraryTests {
         #expect(store.records.isEmpty)
     }
 
+    @Test func batchTrashActionsOnlyAffectSelectedTrashedRecords() throws {
+        let library = try TestLibrary(); defer { library.clean() }
+        let store = try library.store()
+        let first = try #require(store.newNote())
+        let second = try #require(store.newNote())
+        let unselected = try #require(store.newNote())
+        let original = try library.file()
+        let fileRecord = try #require(store.addFiles([original]))
+        let fileID = fileRecord.id
+        let firstID = first.id
+
+        store.delete(first)
+        store.delete(second)
+        store.delete(unselected)
+        let fileTimestamp = fileRecord.touchedAt
+        store.restore([firstID, second.id, fileID, UUID()])
+        #expect(first.deletedAt == nil)
+        #expect(second.deletedAt == nil)
+        #expect(unselected.deletedAt != nil)
+        #expect(fileRecord.touchedAt == fileTimestamp)
+
+        store.delete(first)
+        store.delete(fileRecord)
+        store.delete(second)
+        let confirmedIDs = Set([firstID, fileID, second.id, UUID()])
+        store.restore(second)
+        store.permanentlyDeleteTrashed(confirmedIDs)
+        #expect(Set(store.records.map(\.id)) == Set([second.id, unselected.id]))
+        #expect(FileManager.default.fileExists(atPath: original.path))
+    }
+
     @Test func ordinaryHistoryIsDeletedImmediatelyAndFavoriteGoesToTrash() throws {
         let library = try TestLibrary(); defer { library.clean() }
         let store = try library.store()
@@ -548,6 +579,50 @@ struct LibraryTests {
         let panel = try #require(application.windows.first { $0 is QuickPanel && $0.delegate === controller })
         #expect(panel.frame == target)
         controller.closeQuickPanel(returnFocus: false)
+    }
+
+    @Test func statusDropPanelStaysBelowIconAndFitsTheActiveDisplay() {
+        let screen = NSRect(x: -1440, y: 60, width: 1440, height: 840)
+        let center = NSRect(x: -500, y: screen.maxY, width: 30, height: 28)
+        let centered = StatusDropPanel.frame(below: center, in: screen)
+        #expect(centered.midX == center.midX)
+        #expect(centered.maxY == center.minY)
+        for x in [screen.minX, screen.maxX - 30] {
+            let anchor = NSRect(x: x, y: center.minY, width: 30, height: 28)
+            let frame = StatusDropPanel.frame(below: anchor, in: screen)
+            #expect(screen.insetBy(dx: 8, dy: 0).contains(frame))
+            #expect(frame.maxY == anchor.minY)
+        }
+    }
+
+    @Test func statusDropPanelCanActivateOnApproachFromBelow() {
+        let screen = NSRect(x: -1440, y: 60, width: 1440, height: 840)
+        let anchor = NSRect(x: -35, y: screen.maxY, width: 30, height: 28)
+        let panel = StatusDropPanel.frame(below: anchor, in: screen)
+        let trigger = StatusDropPanel.activationFrame(below: anchor, in: screen)
+        #expect(trigger.contains(panel))
+        #expect(trigger.contains(NSPoint(x: anchor.midX, y: panel.minY - 40)))
+        #expect(!trigger.contains(NSPoint(x: anchor.midX, y: panel.minY - 80)))
+        #expect(screen.contains(trigger))
+    }
+
+    @Test func addingFilesReportsSuccessWithoutOpeningQuickPanel() throws {
+        let application = NSApplication.shared
+        let library = try TestLibrary(); defer { library.clean() }
+        let store = try library.store()
+        let pasteboard = NSPasteboard(name: .init("ZaFeTests-" + UUID().uuidString))
+        defer { pasteboard.releaseGlobally() }
+        let controller = AppController(store: store, settings: library.settings, pasteboard: pasteboard)
+        controller.clipboard.stop()
+        defer { controller.stop() }
+
+        #expect(!controller.addFiles([library.root.appendingPathComponent("missing.txt")]))
+        let file = try library.file()
+        #expect(controller.addFiles([file]))
+        let record = try #require(store.records.first)
+        #expect(record.references.first?.path == file.path)
+        #expect(controller.mainSelection == record.id)
+        #expect(!application.windows.contains { $0 is QuickPanel && $0.delegate === controller })
     }
 
     @Test func notesDoNotWriteToClipboard() throws {

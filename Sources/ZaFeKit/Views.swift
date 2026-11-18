@@ -418,6 +418,13 @@ struct QuickPanelView: View {
 struct ManagerView: View {
     @Bindable var controller: AppController
     @State private var dropTargeted = false
+    @State private var trashDetailSelection: UUID?
+    @State private var checkedTrashIDs = Set<UUID>()
+    @State private var pendingTrashDeletion = Set<UUID>()
+
+    private var visibleCheckedTrashIDs: Set<UUID> {
+        checkedTrashIDs.intersection(controller.mainRecords.map(\.id))
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -443,6 +450,7 @@ struct ManagerView: View {
                 }.buttonStyle(.borderless).padding(16)
             }.navigationSplitViewColumnWidth(min: 166, ideal: 184, max: 220)
         } content: {
+            let records = controller.mainRecords
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -455,14 +463,24 @@ struct ManagerView: View {
                 HStack {
                     Text((controller.mainFilter ?? .all).label).font(.system(size: 12, weight: .semibold))
                     Spacer()
-                    Text("\(controller.mainRecords.count)").font(.system(size: 11)).monospacedDigit().foregroundStyle(.tertiary)
+                    if controller.mainFilter == .trash, !records.isEmpty {
+                        Toggle("全选", sources: records.map { trashCheck(for: $0.id) }, isOn: \.self)
+                            .toggleStyle(.checkbox)
+                            .font(.system(size: 12))
+                    }
+                    Text("\(records.count)").font(.system(size: 11)).monospacedDigit().foregroundStyle(.tertiary)
                 }.padding(.horizontal, 16).padding(.bottom, 10)
                 Divider()
-                if controller.mainRecords.isEmpty {
+                if records.isEmpty {
                     ContentUnavailableView(controller.mainQuery.isEmpty ? "暂无记录" : "没有找到记录", systemImage: controller.mainQuery.isEmpty ? (controller.mainFilter ?? .all).symbol : "magnifyingglass")
                         .frame(maxHeight: .infinity)
+                } else if controller.mainFilter == .trash {
+                    List(records, selection: $trashDetailSelection) { record in
+                        trashRow(record).tag(record.id)
+                    }
+                    .listStyle(.inset).scrollContentBackground(.hidden)
                 } else {
-                    List(controller.mainRecords, selection: $controller.mainSelection) { record in
+                    List(records, selection: $controller.mainSelection) { record in
                         RecordRow(record: record, store: controller.store).tag(record.id)
                             .contextMenu { RecordMenu(record: record, controller: controller) }
                             .onTapGesture(count: 2) {
@@ -476,7 +494,15 @@ struct ManagerView: View {
             }
             .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 430)
         } detail: {
-            if let record = controller.mainRecords.first(where: { $0.id == controller.mainSelection }) {
+            let inTrash = controller.mainFilter == .trash
+            let selected = inTrash ? visibleCheckedTrashIDs : []
+            if !selected.isEmpty {
+                ContentUnavailableView {
+                    Label("已勾选 \(selected.count) 条记录", systemImage: "trash")
+                } actions: {
+                    trashActions(selected).buttonStyle(.bordered)
+                }
+            } else if let record = controller.mainRecords.first(where: { $0.id == (inTrash ? trashDetailSelection : controller.mainSelection) }) {
                 RecordDetailView(record: record, controller: controller).id(record.id)
             } else {
                 ContentUnavailableView {
@@ -488,6 +514,19 @@ struct ManagerView: View {
             }
         }
         .navigationTitle("ZaFe")
+        .onChange(of: controller.mainRecords.map(\.id)) { _, visibleIDs in
+            checkedTrashIDs.formIntersection(visibleIDs)
+        }
+        .onChange(of: controller.mainFilter) { _, _ in
+            checkedTrashIDs.removeAll()
+            trashDetailSelection = nil
+        }
+        .confirmationDialog("彻底删除 \(pendingTrashDeletion.count) 条记录？此操作无法恢复。",
+                            isPresented: Binding(get: { !pendingTrashDeletion.isEmpty },
+                                                 set: { if !$0 { pendingTrashDeletion.removeAll() } }),
+                            titleVisibility: .visible, presenting: pendingTrashDeletion) { ids in
+            Button("彻底删除", role: .destructive) { controller.store.permanentlyDeleteTrashed(ids) }
+        }
         .toolbar {
             ToolbarItemGroup {
                 AddFilesMenu(controller: controller)
@@ -502,6 +541,33 @@ struct ManagerView: View {
             controller.addFiles(files)
             return true
         } isTargeted: { dropTargeted = $0 }
+    }
+
+    private func trashRow(_ record: LibraryRecord) -> some View {
+        let id = record.id
+        return HStack(spacing: 10) {
+            Toggle("勾选 \(record.displayTitle)", isOn: trashCheck(for: id))
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+            RecordRow(record: record, store: controller.store)
+        }
+        .contentShape(Rectangle())
+        .contextMenu {
+            let checked = visibleCheckedTrashIDs
+            trashActions(checked.contains(id) ? checked : [id])
+        }
+    }
+
+    private func trashCheck(for id: UUID) -> Binding<Bool> {
+        Binding(get: { checkedTrashIDs.contains(id) }, set: { checked in
+            if checked { checkedTrashIDs.insert(id) }
+            else { checkedTrashIDs.remove(id) }
+        })
+    }
+
+    @ViewBuilder private func trashActions(_ ids: Set<UUID>) -> some View {
+        Button("恢复", systemImage: "arrow.uturn.backward") { controller.store.restore(ids) }
+        Button("彻底删除…", systemImage: "trash.slash", role: .destructive) { pendingTrashDeletion = ids }
     }
 
     private func sidebarRow(_ filter: LibraryFilter) -> some View {
@@ -560,7 +626,7 @@ struct RecordDetailView: View {
         }
         .background(showsBackground ? Color(nsColor: .textBackgroundColor) : .clear)
         .confirmationDialog("彻底删除？此操作无法恢复。", isPresented: $confirmPermanentDelete, titleVisibility: .visible) {
-            Button("彻底删除", role: .destructive) { controller.store.permanentlyDelete([record]) }
+            Button("彻底删除", role: .destructive) { controller.store.permanentlyDeleteTrashed([record.id]) }
         }
     }
 
