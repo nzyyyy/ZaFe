@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import Darwin
 import ImageIO
 import Observation
 import SwiftData
@@ -299,6 +300,20 @@ final class LibraryStore {
     }
 
     func fileIsAvailable(_ reference: FileReference) -> Bool { (try? reference.resolved()) != nil }
+
+    func readableFiles(for record: LibraryRecord) throws -> [URL] {
+        let urls = try resolvedFiles(for: record)
+        // Opening without reading lets macOS request protected-folder access before sharing the URLs.
+        for url in urls {
+            let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)
+            guard descriptor >= 0 else {
+                let code: CocoaError.Code = errno == EACCES || errno == EPERM ? .fileReadNoPermission : .fileReadUnknown
+                throw CocoaError(code, userInfo: [NSFilePathErrorKey: url.path])
+            }
+            close(descriptor)
+        }
+        return urls
+    }
 
     func relocate(_ record: LibraryRecord, referenceID: UUID, to url: URL) {
         do {

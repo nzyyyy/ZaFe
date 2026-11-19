@@ -12,6 +12,20 @@ private extension EnvironmentValues {
     @Entry var quickPanelHover = false
 }
 
+private extension View {
+    func fileDropDestination(controller: AppController, isTargeted: Binding<Bool>) -> some View {
+        dropDestination(for: URL.self, isEnabled: true) { urls, session in
+            controller.addDroppedFiles(urls, isLocal: session.localSession != nil)
+        }
+        .dropConfiguration { session in
+            DropConfiguration(operation: session.localSession == nil ? .copy : .forbidden)
+        }
+        .onDropSessionUpdated { session in
+            isTargeted.wrappedValue = session.localSession == nil && (session.phase == .entering || session.phase == .active)
+        }
+    }
+}
+
 private struct PanelHover: ViewModifier {
     @Environment(\.quickPanelHover) private var enabled
     @Environment(\.isEnabled) private var isEnabled
@@ -126,6 +140,50 @@ struct RecordRow: View {
     }
 }
 
+private struct FileDrag: NSGestureRecognizerRepresentable {
+    let record: LibraryRecord
+    let store: LibraryStore
+
+    func makeNSGestureRecognizer(context: Context) -> Recognizer { Recognizer() }
+
+    func handleNSGestureRecognizerAction(_ recognizer: Recognizer, context: Context) {
+        guard recognizer.state == .began, let event = recognizer.mouseDownEvent,
+              let view = event.window?.contentView else { return }
+        do {
+            let urls = try store.readableFiles(for: record)
+            let location = view.convert(event.locationInWindow, from: nil)
+            let size = Appearance.iconSize
+            let frame = NSRect(x: location.x - size / 2, y: location.y - size / 2, width: size, height: size)
+            let items = urls.map { url in
+                let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+                item.setDraggingFrame(frame, contents: NSWorkspace.shared.icon(forFile: url.path))
+                return item
+            }
+            view.beginDraggingSession(with: items, event: event, source: recognizer).draggingFormation = .stack
+        } catch {
+            store.notice = error.localizedDescription
+        }
+    }
+
+    final class Recognizer: NSPanGestureRecognizer, NSDraggingSource {
+        private(set) var mouseDownEvent: NSEvent?
+
+        override func mouseDown(with event: NSEvent) {
+            mouseDownEvent = event
+            super.mouseDown(with: event)
+        }
+
+        override func reset() {
+            mouseDownEvent = nil
+            super.reset()
+        }
+
+        func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+            context == .outsideApplication ? .copy : []
+        }
+    }
+}
+
 struct RecordMenu: View {
     let record: LibraryRecord
     let controller: AppController
@@ -204,6 +262,8 @@ struct QuickPanelView: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @FocusState private var searchFocused: Bool
     @FocusState private var appearanceFocused: Bool
+    @FocusState private var fileDetailFocused: Bool
+    @State private var searchSelection: TextSelection?
     @State private var dropTargeted = false
     @State private var hoveredRecordID: UUID?
     @State private var hoveredFilter: LibraryFilter?
@@ -225,9 +285,11 @@ struct QuickPanelView: View {
                     .buttonStyle(.borderless).padding(.horizontal, 18).padding(.vertical, 14)
                     appearanceControls
                     Divider()
-                    RecordDetailView(record: record, controller: controller, showsBackground: false).id(record.id)
+                    RecordDetailView(record: record, controller: controller, showsBackground: false,
+                                     fileDetailFocus: $fileDetailFocused).id(record.id)
                     StatusArea(controller: controller)
                 }
+                .defaultFocus($fileDetailFocused, record.kind == .files)
             } else {
                 recordList
             }
@@ -237,14 +299,18 @@ struct QuickPanelView: View {
         .environment(\.quickPanelHover, true)
         .background(Color(nsColor: .windowBackgroundColor).opacity(reduceTransparency ? 1 : 1 - controller.settings.quickPanelTransparency))
         .overlay { if dropTargeted { RoundedRectangle(cornerRadius: 10).stroke(.tint, lineWidth: 2).padding(4).allowsHitTesting(false) } }
-        .dropDestination(for: URL.self) { urls, _ in
-            let files = urls.filter(\.isFileURL)
-            guard !files.isEmpty else { return false }
-            controller.addFiles(files)
-            return true
-        } isTargeted: { dropTargeted = $0 }
+        .fileDropDestination(controller: controller, isTargeted: $dropTargeted)
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { notification in
+            guard let window = notification.object as? QuickPanel, window.delegate === controller else { return }
+            searchFocused = false
+        }
         .onReceive(NotificationCenter.default.publisher(for: .focusQuickSearch)) { _ in
             searchFocused = controller.quickDetail == nil && !controller.isAdjustingPanelAppearance
+            // Apply the insertion point after the field's default focus selection.
+            DispatchQueue.main.async {
+                guard searchFocused else { return }
+                searchSelection = TextSelection(insertionPoint: controller.quickQuery.endIndex)
+            }
         }
         .onChange(of: controller.quickDetail?.id) { _, id in
             if id == nil { controller.closeQuickDetail() }
@@ -294,6 +360,26 @@ struct QuickPanelView: View {
         }
     }
 
+    @ViewBuilder private func rowContent(_ record: LibraryRecord) -> some View {
+        if record.kind == .files {
+            RecordRow(record: record, store: controller.store, compact: true)
+                .onTapGesture { controller.showQuickDetail(record) }
+                .gesture(FileDrag(record: record, store: controller.store))
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { controller.showQuickDetail(record) }
+                .help("点击查看详情，按住拖出文件")
+        } else if record.kind == .note || record.isClipboard {
+            Button { controller.showQuickDetail(record) } label: {
+                RecordRow(record: record, store: controller.store, compact: true)
+            }
+            .buttonStyle(.plain)
+            .help(record.kind == .note ? "查看与编辑便签" : "查看详情")
+        } else {
+            RecordRow(record: record, store: controller.store, compact: true)
+                .onTapGesture(count: 2) { controller.activateFromQuick(record) }
+        }
+    }
+
     private var recordList: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -316,7 +402,7 @@ struct QuickPanelView: View {
 
             HStack(spacing: 9) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("搜索记录", text: $controller.quickQuery).textFieldStyle(.plain)
+                TextField("搜索记录", text: $controller.quickQuery, selection: $searchSelection).textFieldStyle(.plain)
                     .focused($searchFocused).accessibilityLabel("搜索记录")
                 if !controller.quickQuery.isEmpty {
                     Button { controller.quickQuery = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }
@@ -357,16 +443,7 @@ struct QuickPanelView: View {
                     List(selection: $controller.quickSelection) {
                         ForEach(controller.quickRecords) { record in
                             HStack(spacing: 6) {
-                                if record.kind == .note || record.isClipboard {
-                                    Button { controller.showQuickDetail(record) } label: {
-                                        RecordRow(record: record, store: controller.store, compact: true)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help(record.kind == .note ? "查看与编辑便签" : "查看详情")
-                                } else {
-                                    RecordRow(record: record, store: controller.store, compact: true)
-                                        .onTapGesture(count: 2) { controller.activateFromQuick(record) }
-                                }
+                                rowContent(record)
                                 if record.kind != .note {
                                     Button { controller.activateFromQuick(record) } label: { Image(systemName: "doc.on.doc").foregroundStyle(.secondary) }
                                         .buttonStyle(.borderless).help("复制").accessibilityLabel("复制 \(record.displayTitle)")
@@ -535,12 +612,7 @@ struct ManagerView: View {
             }
         }
         .overlay { if dropTargeted { RoundedRectangle(cornerRadius: 10).stroke(.tint, lineWidth: 3).padding(6).allowsHitTesting(false) } }
-        .dropDestination(for: URL.self) { urls, _ in
-            let files = urls.filter(\.isFileURL)
-            guard !files.isEmpty else { return false }
-            controller.addFiles(files)
-            return true
-        } isTargeted: { dropTargeted = $0 }
+        .fileDropDestination(controller: controller, isTargeted: $dropTargeted)
     }
 
     private func trashRow(_ record: LibraryRecord) -> some View {
@@ -580,12 +652,19 @@ struct RecordDetailView: View {
     @Bindable var record: LibraryRecord
     let controller: AppController
     var showsBackground = true
+    var fileDetailFocus: FocusState<Bool>.Binding?
     @State private var confirmPermanentDelete = false
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Label(record.kind.label, systemImage: record.kind.symbol).font(.system(size: 11)).foregroundStyle(.secondary)
+                let kindLabel = Label(record.kind.label, systemImage: record.kind.symbol)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                if record.kind == .files, let fileDetailFocus {
+                    kindLabel.focusable(interactions: .edit).focused(fileDetailFocus).focusEffectDisabled()
+                } else {
+                    kindLabel
+                }
                 Spacer()
                 if record.deletedAt != nil {
                     Button("恢复", systemImage: "arrow.uturn.backward") { controller.store.restore(record) }

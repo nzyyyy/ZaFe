@@ -269,9 +269,23 @@ struct LibraryTests {
         let record = try #require(store.addFiles([original]))
         let moved = library.root.appendingPathComponent("renamed.txt")
         try FileManager.default.moveItem(at: original, to: moved)
-        let resolved = try store.resolvedFiles(for: record)
+        let resolved = try store.readableFiles(for: record)
         #expect(resolved.first?.path == moved.path)
         #expect(record.references.first?.path == moved.path)
+    }
+
+    @Test func filesForSharingIncludeFoldersAndRequireEveryReferencedItem() throws {
+        let library = try TestLibrary(); defer { library.clean() }
+        let store = try library.store()
+        let file = try library.file("文件 with spaces.txt")
+        let folder = library.root.appendingPathComponent("folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let record = try store.capture(.files([file, folder]))
+
+        #expect(try store.readableFiles(for: record).map(\.path) == [file.path, folder.path])
+
+        try FileManager.default.removeItem(at: file)
+        #expect(throws: (any Error).self) { try store.readableFiles(for: record) }
     }
 
     @Test func searchIncludesTextTitlesAndPathsButNotTrash() throws {
@@ -412,13 +426,14 @@ struct LibraryTests {
         #expect(pasteboard.string(forType: .string) == "保留剪贴板")
     }
 
-    @Test func clipboardDetailsStayInPanelAndListReturnCopies() throws {
+    @Test func fileAndClipboardDetailsStayInPanelAndListReturnCopies() throws {
         let application = NSApplication.shared
         let library = try TestLibrary(); defer { library.clean() }
         let store = try library.store()
         let text = try store.capture(.text("标题\n完整正文"))
         let image = try store.capture(.image(samplePNG()))
         let files = try store.capture(.files([library.file()]))
+        let manualFile = try #require(store.addFiles([library.file("manual.txt")]))
         let pasteboard = NSPasteboard(name: .init("ZaFeTests-" + UUID().uuidString))
         defer { pasteboard.releaseGlobally() }
         pasteboard.setString("保留剪贴板", forType: .string)
@@ -432,16 +447,18 @@ struct LibraryTests {
         controller.isPinned = true
         controller.toggleQuickPanel()
         let panel = try #require(application.windows.first { $0 is QuickPanel && $0.delegate === controller })
-        controller.quickFilter = .clipboard
-        for record in [image, files] {
+        for (record, filter) in [(image, LibraryFilter.clipboard), (files, .files), (manualFile, .files)] {
+            controller.quickFilter = filter
             controller.showQuickDetail(record)
             #expect(controller.quickDetail?.id == record.id)
             #expect(panel.isVisible)
             #expect(pasteboard.changeCount == changeCount)
             controller.closeQuickDetail()
             #expect(controller.quickDetail == nil)
+            #expect(controller.quickSelection == record.id)
         }
 
+        controller.quickFilter = .clipboard
         controller.quickQuery = "完整正文"
         controller.showQuickDetail(text)
         #expect(controller.quickDetail?.id == text.id)
@@ -567,6 +584,13 @@ struct LibraryTests {
             #expect(!controller.isAdjustingPanelAppearance)
             #expect(panel.frame == target)
             #expect(controller.quickSelection == nil)
+            controller.quickFilter = .clipboard
+            controller.quickQuery = "first"
+            controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: panel))
+            #expect(!panel.isVisible)
+            controller.toggleQuickPanel()
+            #expect(controller.quickQuery == "first")
+            #expect(controller.quickRecords.map(\.body) == ["first"])
             controller.closeQuickPanel(returnFocus: false)
         }
         let settings = AppSettings(defaults: library.settings.defaults)
@@ -579,6 +603,38 @@ struct LibraryTests {
         let panel = try #require(application.windows.first { $0 is QuickPanel && $0.delegate === controller })
         #expect(panel.frame == target)
         controller.closeQuickPanel(returnFocus: false)
+    }
+
+    @Test func quickPanelPlacesSearchCaretAtEndOnReopen() async throws {
+        let application = NSApplication.shared
+        let library = try TestLibrary(); defer { library.clean() }
+        let store = try library.store()
+        _ = try store.capture(.text("first"))
+        let pasteboard = NSPasteboard(name: .init("ZaFeTests-" + UUID().uuidString))
+        defer { pasteboard.releaseGlobally() }
+        let controller = AppController(store: store, settings: library.settings, pasteboard: pasteboard)
+        controller.clipboard.stop()
+        defer {
+            controller.stop()
+            for window in application.windows where window.delegate === controller { window.close() }
+        }
+        controller.toggleQuickPanel()
+        let panel = try #require(application.windows.first { $0 is QuickPanel && $0.delegate === controller })
+        try await Task.sleep(for: .milliseconds(100))
+        controller.quickQuery = "first"
+        try await Task.sleep(for: .milliseconds(100))
+
+        for _ in 0..<2 {
+            controller.windowDidResignKey(Notification(name: NSWindow.didResignKeyNotification, object: panel))
+            #expect(!panel.isVisible)
+            try await Task.sleep(for: .milliseconds(100))
+            controller.toggleQuickPanel()
+            try await Task.sleep(for: .milliseconds(100))
+            try #require(panel.isKeyWindow)
+            let focusedEditor = panel.firstResponder as? NSTextView
+            let searchEditor = try #require(focusedEditor)
+            #expect(searchEditor.selectedRange() == NSRange(location: "first".utf16.count, length: 0))
+        }
     }
 
     @Test func statusDropPanelStaysBelowIconAndFitsTheActiveDisplay() {
@@ -623,6 +679,26 @@ struct LibraryTests {
         #expect(record.references.first?.path == file.path)
         #expect(controller.mainSelection == record.id)
         #expect(!application.windows.contains { $0 is QuickPanel && $0.delegate === controller })
+    }
+
+    @Test func droppedFilesRejectLocalDragsAndAcceptTheSameFileFromOutside() throws {
+        let library = try TestLibrary(); defer { library.clean() }
+        let store = try library.store()
+        let file = try library.file()
+        let clipboardRecord = try store.capture(.files([file]))
+        let pasteboard = NSPasteboard(name: .init("ZaFeTests-" + UUID().uuidString))
+        defer { pasteboard.releaseGlobally() }
+        let controller = AppController(store: store, settings: library.settings, pasteboard: pasteboard)
+        controller.clipboard.stop()
+        defer { controller.stop() }
+
+        #expect(!controller.addDroppedFiles([file], isLocal: true))
+        #expect(store.records.map(\.id) == [clipboardRecord.id])
+        #expect(controller.mainSelection == nil)
+
+        #expect(controller.addDroppedFiles([file], isLocal: false))
+        #expect(store.records.count == 2)
+        #expect(store.records.first { !$0.isClipboard }?.references.first?.path == file.path)
     }
 
     @Test func notesDoNotWriteToClipboard() throws {

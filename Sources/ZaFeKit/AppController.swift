@@ -155,10 +155,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
             panel = window
             if savedFrame == nil { positionPanel() }
         }
-        if quickDetail == nil {
-            quickQuery = ""
-            quickSelection = nil
-        }
+        if quickDetail == nil { quickSelection = nil }
         if let panel {
             let fallback = statusItem?.button?.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
                 ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -276,7 +273,7 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
     }
 
     func showQuickDetail(_ record: LibraryRecord) {
-        guard record.deletedAt == nil, record.kind == .note || record.isClipboard else { return }
+        guard record.deletedAt == nil, record.kind == .note || record.kind == .files || record.isClipboard else { return }
         panel?.makeFirstResponder(nil)
         guard store.flush() else { return }
         quickSelection = record.id
@@ -315,6 +312,12 @@ final class AppController: NSResponder, NSWindowDelegate, @preconcurrency QLPrev
         mainQuery = ""
         mainSelection = record.id
         return true
+    }
+
+    @discardableResult
+    func addDroppedFiles(_ urls: [URL], isLocal: Bool) -> Bool {
+        guard !isLocal else { return false }
+        return addFiles(urls.filter(\.isFileURL))
     }
 
     func pasteFiles() {
@@ -516,7 +519,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     public func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        guard sender.draggingSourceOperationMask.contains(.copy),
+        guard sender.draggingSource == nil, sender.draggingSourceOperationMask.contains(.copy),
               sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) else { return [] }
         dismissStatusDrop?.cancel()
         if let panel = statusDropPanel, sender.draggingDestinationWindow === panel {
@@ -557,7 +560,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         finishStatusDrag()
         guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
               !urls.isEmpty else { return false }
-        return controller?.addFiles(urls) == true
+        return controller?.addDroppedFiles(urls, isLocal: sender.draggingSource != nil) == true
     }
 
     private func hideStatusDropPanel() {

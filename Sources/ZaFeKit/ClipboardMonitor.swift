@@ -1,5 +1,4 @@
 import AppKit
-import Darwin
 import ImageIO
 import Observation
 
@@ -117,17 +116,7 @@ final class ClipboardMonitor {
                 case .text: objects = [record.body as NSString]
                 case .note: return false
                 case .files:
-                    let urls = try store.resolvedFiles(for: record)
-                    // Opening without reading lets macOS request protected-folder access before sharing the URLs.
-                    for url in urls {
-                        let descriptor = open(url.path, O_RDONLY | O_CLOEXEC)
-                        guard descriptor >= 0 else {
-                            let code: CocoaError.Code = errno == EACCES || errno == EPERM ? .fileReadNoPermission : .fileReadUnknown
-                            throw CocoaError(code, userInfo: [NSFilePathErrorKey: url.path])
-                        }
-                        close(descriptor)
-                    }
-                    objects = urls.map { $0 as NSURL }
+                    objects = try store.readableFiles(for: record).map { $0 as NSURL }
                 case .image:
                     let data = try store.imageData(for: record)
                     guard let source = CGImageSourceCreateWithData(data as CFData, nil), let type = CGImageSourceGetType(source) else {
