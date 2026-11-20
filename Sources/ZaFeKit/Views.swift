@@ -269,21 +269,39 @@ struct QuickPanelView: View {
     @State private var hoveredFilter: LibraryFilter?
 
     var body: some View {
-        Group {
-            if let record = controller.quickDetail {
+        let record = controller.quickDetail
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                if record != nil {
+                    Button("返回", systemImage: "chevron.left") { controller.closeQuickDetail() }
+                        .help("返回列表 Esc")
+                        .modifier(PanelHover())
+                } else {
+                    Image(systemName: "square.stack.3d.up").font(.system(size: 17, weight: .medium))
+                    Text("ZaFe").font(.system(size: 15, weight: .semibold))
+                }
+                Spacer()
+                if record != nil {
+                    Button { controller.newNote() } label: { Image(systemName: "square.and.pencil") }
+                        .help("新建便签 ⌘N").accessibilityLabel("新建便签")
+                        .modifier(PanelHover())
+                }
+                appearanceButton
+                Button { controller.isPinned.toggle() } label: {
+                    Image(systemName: controller.isPinned ? "pin.fill" : "pin")
+                        .foregroundStyle(controller.isPinned ? .primary : .secondary)
+                }.help(controller.isPinned ? "取消固定" : "固定面板")
+                    .accessibilityLabel(controller.isPinned ? "取消固定面板" : "固定面板")
+                    .modifier(PanelHover())
+                Button { controller.showManager() } label: { Image(systemName: "sidebar.left") }
+                    .help("打开管理窗口").accessibilityLabel("打开管理窗口")
+                    .modifier(PanelHover())
+            }
+            .buttonStyle(.borderless).padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 13)
+            appearanceControls
+
+            if let record {
                 VStack(spacing: 0) {
-                    HStack {
-                        Button("返回", systemImage: "chevron.left") { controller.closeQuickDetail() }
-                            .help("返回列表 Esc")
-                            .modifier(PanelHover())
-                        Spacer()
-                        appearanceButton
-                        Button { controller.newNote() } label: { Image(systemName: "square.and.pencil") }
-                            .help("新建便签 ⌘N").accessibilityLabel("新建便签")
-                            .modifier(PanelHover())
-                    }
-                    .buttonStyle(.borderless).padding(.horizontal, 18).padding(.vertical, 14)
-                    appearanceControls
                     Divider()
                     RecordDetailView(record: record, controller: controller, showsBackground: false,
                                      fileDetailFocus: $fileDetailFocused).id(record.id)
@@ -382,24 +400,6 @@ struct QuickPanelView: View {
 
     private var recordList: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "square.stack.3d.up").font(.system(size: 17, weight: .medium))
-                Text("ZaFe").font(.system(size: 15, weight: .semibold))
-                Spacer()
-                appearanceButton
-                Button { controller.isPinned.toggle() } label: {
-                    Image(systemName: controller.isPinned ? "pin.fill" : "pin")
-                        .foregroundStyle(controller.isPinned ? .primary : .secondary)
-                }.help(controller.isPinned ? "取消固定" : "固定面板")
-                    .accessibilityLabel(controller.isPinned ? "取消固定面板" : "固定面板")
-                    .modifier(PanelHover())
-                Button { controller.showManager() } label: { Image(systemName: "sidebar.left") }
-                    .help("打开管理窗口").accessibilityLabel("打开管理窗口")
-                    .modifier(PanelHover())
-            }
-            .buttonStyle(.borderless).padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 13)
-            appearanceControls
-
             HStack(spacing: 9) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("搜索记录", text: $controller.quickQuery, selection: $searchSelection).textFieldStyle(.plain)
